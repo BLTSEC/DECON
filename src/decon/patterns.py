@@ -55,12 +55,28 @@ class Rule:
         return self.pattern.sub(_replace, text)
 
 
+# IPs that are never sensitive — loopback, unspecified, link-local, documentation.
+_SKIP_IPV4 = frozenset({
+    "127.0.0.1", "0.0.0.0", "255.255.255.255",
+})
+
+# Prefixes that are never target IPs (loopback range, link-local, documentation)
+_SKIP_IPV4_PREFIXES = ("127.", "169.254.", "192.0.2.", "198.51.100.", "203.0.113.")
+
+
 def _valid_ipv4(value: str) -> bool:
-    """Check all octets are 0-255."""
+    """Check all octets are 0-255 and not a loopback/special address."""
     parts = value.split(".")
     if len(parts) != 4:
         return False
-    return all(0 <= int(p) <= 255 for p in parts)
+    if not all(0 <= int(p) <= 255 for p in parts):
+        return False
+    # Skip loopback and other non-sensitive addresses
+    if value in _SKIP_IPV4:
+        return False
+    if any(value.startswith(p) for p in _SKIP_IPV4_PREFIXES):
+        return False
+    return True
 
 
 def _luhn_check(value: str) -> bool:
@@ -175,6 +191,23 @@ _URL = re.compile(
     r"[^\s<>\"\x27\)\]]*"
     r"[^\s<>\"\x27\)\].,;:!?\-]"
 )
+
+# Public code/tool hosting domains — URLs to these are references to public
+# resources (tools, wordlists, docs), not target infrastructure.  Sensitive
+# values inside them (org names, repo names) are caught by custom value rules.
+_PUBLIC_URL_DOMAINS = frozenset({
+    "github.com", "raw.githubusercontent.com", "gist.github.com",
+    "gitlab.com", "bitbucket.org",
+    "exploit-db.com", "cvedetails.com",
+    "attack.mitre.org",
+})
+
+
+def _valid_url(value: str) -> bool:
+    """Skip URLs pointing to well-known public tool/resource domains."""
+    # Extract domain from URL
+    stripped = value.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0].lower()
+    return stripped not in _PUBLIC_URL_DOMAINS
 
 # Generic API key / token in key=value or key: value contexts
 _CONTEXT_SECRET = re.compile(
@@ -358,6 +391,7 @@ def build_default_rules() -> list[Rule]:
             priority=28,
             pattern=_URL,
             placeholder_template="URL_REDACTED_{n:02d}",
+            validator=_valid_url,
         ),
         Rule(
             name="email",

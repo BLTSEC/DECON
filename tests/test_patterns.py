@@ -37,8 +37,14 @@ class TestIPv4Pattern:
 class TestIPv4Validator:
     def test_valid(self):
         assert _valid_ipv4("192.168.1.1")
-        assert _valid_ipv4("0.0.0.0")
-        assert _valid_ipv4("255.255.255.255")
+        assert _valid_ipv4("10.10.14.5")
+
+    def test_skipped_special(self):
+        """Loopback, broadcast, and unspecified IPs are skipped."""
+        assert not _valid_ipv4("127.0.0.1")
+        assert not _valid_ipv4("0.0.0.0")
+        assert not _valid_ipv4("255.255.255.255")
+        assert not _valid_ipv4("169.254.1.1")
 
     def test_invalid(self):
         assert not _valid_ipv4("256.1.1.1")

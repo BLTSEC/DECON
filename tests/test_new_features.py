@@ -676,3 +676,131 @@ class TestLLMTruncation:
         ]
         for p in new_placeholders:
             assert _PLACEHOLDER_RE.match(p), f"Placeholder not matched: {p}"
+
+
+class TestLLMPostFilterNormalization:
+    """Test that the post-filter handles LLM-added context on placeholder values."""
+
+    def test_ip_with_port_filtered(self):
+        from decon.llm import _filter_placeholder_findings
+
+        raw = "FOUND: 10.0.0.1:81"
+        assert _filter_placeholder_findings(raw) == "CLEAN"
+
+    def test_ip_with_parenthetical_filtered(self):
+        from decon.llm import _filter_placeholder_findings
+
+        raw = "FOUND: 10.0.0.1 (target IP)"
+        assert _filter_placeholder_findings(raw) == "CLEAN"
+
+    def test_ip_with_dash_commentary_filtered(self):
+        from decon.llm import _filter_placeholder_findings
+
+        raw = "FOUND: 10.0.0.1 - used as target"
+        assert _filter_placeholder_findings(raw) == "CLEAN"
+
+    def test_ip_with_protocol_prefix_filtered(self):
+        from decon.llm import _filter_placeholder_findings
+
+        raw = "FOUND: http-get://10.0.0.1:81/"
+        assert _filter_placeholder_findings(raw) == "CLEAN"
+
+    def test_plain_placeholder_still_filtered(self):
+        from decon.llm import _filter_placeholder_findings
+
+        raw = "FOUND: 10.0.0.1"
+        assert _filter_placeholder_findings(raw) == "CLEAN"
+
+    def test_software_with_context_filtered(self):
+        from decon.llm import _filter_placeholder_findings
+
+        raw = "FOUND: OpenSSH (in banner)"
+        assert _filter_placeholder_findings(raw) == "CLEAN"
+
+    def test_real_finding_preserved(self):
+        from decon.llm import _filter_placeholder_findings
+
+        raw = "FOUND: basic-auth-user"
+        result = _filter_placeholder_findings(raw)
+        assert "FOUND:" in result
+        assert "basic-auth-user" in result
+
+    def test_mixed_real_and_placeholder(self):
+        from decon.llm import _filter_placeholder_findings
+
+        raw = "FOUND: 10.0.0.1:81\nFOUND: basic-auth-user\nFOUND: 10.0.0.2 (target)"
+        result = _filter_placeholder_findings(raw)
+        assert "basic-auth-user" in result
+        assert "10.0.0.1" not in result
+        assert "10.0.0.2" not in result
+
+    def test_normalize_finding_direct(self):
+        from decon.llm import _normalize_finding
+
+        assert _normalize_finding("10.0.0.1:81") == "10.0.0.1"
+        assert _normalize_finding("10.0.0.1 (target IP)") == "10.0.0.1"
+        assert _normalize_finding("10.0.0.1 - target") == "10.0.0.1"
+        assert _normalize_finding("http-get://10.0.0.1:81/") == "10.0.0.1"
+        assert _normalize_finding("https://10.0.0.3/path") == "10.0.0.3"
+        assert _normalize_finding("OpenSSH (in banner)") == "OpenSSH"
+        assert _normalize_finding("basic-auth-user") == "basic-auth-user"
+
+
+class TestLLMPostFilterArtifacts:
+    """Test that timestamps and public wordlist filenames are filtered."""
+
+    def test_timestamp_datetime_filtered(self):
+        from decon.llm import _filter_placeholder_findings
+
+        raw = "FOUND: 2024-09-09 16:04:31"
+        assert _filter_placeholder_findings(raw) == "CLEAN"
+
+    def test_timestamp_date_only_filtered(self):
+        from decon.llm import _filter_placeholder_findings
+
+        raw = "FOUND: 2024-09-09"
+        assert _filter_placeholder_findings(raw) == "CLEAN"
+
+    def test_timestamp_time_only_filtered(self):
+        from decon.llm import _filter_placeholder_findings
+
+        raw = "FOUND: 16:04:31"
+        assert _filter_placeholder_findings(raw) == "CLEAN"
+
+    def test_timestamp_iso_t_separator_filtered(self):
+        from decon.llm import _filter_placeholder_findings
+
+        raw = "FOUND: 2024-09-09T16:04:31"
+        assert _filter_placeholder_findings(raw) == "CLEAN"
+
+    def test_wordlist_filename_filtered(self):
+        from decon.llm import _filter_placeholder_findings
+
+        raw = "FOUND: 2023-200_most_used_passwords.txt"
+        assert _filter_placeholder_findings(raw) == "CLEAN"
+
+    def test_rockyou_filtered(self):
+        from decon.llm import _filter_placeholder_findings
+
+        raw = "FOUND: rockyou.txt"
+        assert _filter_placeholder_findings(raw) == "CLEAN"
+
+    def test_seclists_directory_list_filtered(self):
+        from decon.llm import _filter_placeholder_findings
+
+        raw = "FOUND: directory-list-2.3-medium.txt"
+        assert _filter_placeholder_findings(raw) == "CLEAN"
+
+    def test_multiple_timestamps_filtered(self):
+        from decon.llm import _filter_placeholder_findings
+
+        raw = "FOUND: 2024-09-09 16:04:31\nFOUND: 2024-09-09 16:04:32"
+        assert _filter_placeholder_findings(raw) == "CLEAN"
+
+    def test_real_finding_not_affected(self):
+        from decon.llm import _filter_placeholder_findings
+
+        raw = "FOUND: 2023-200_most_used_passwords.txt\nFOUND: admin@corp.local"
+        result = _filter_placeholder_findings(raw)
+        assert "admin@corp.local" in result
+        assert "2023-200_most_used_passwords.txt" not in result

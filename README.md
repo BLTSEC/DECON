@@ -87,6 +87,10 @@ Rules are applied in priority order to prevent partial matches (e.g., JWTs are m
 | UNC Path | `\\dc01\SYSVOL` | `UNC_PATH_01` | 34 |
 | CIDR | `10.0.0.0/16` | `10.0.0.1/16` | 39 |
 | IPv4 | `192.168.1.50` | `10.0.0.1` | 40 |
+
+Loopback and special addresses (`127.0.0.1`, `0.0.0.0`, `255.255.255.255`, `169.254.x.x`) pass through unredacted — they're never target infrastructure.
+
+URLs pointing to public code hosting and security reference sites (`github.com`, `gitlab.com`, `exploit-db.com`, `attack.mitre.org`, etc.) also pass through. Sensitive values within them (org names, repo names) are still caught by custom value rules.
 | IPv6 | `fe80::1` | `fd00::1` | 40 |
 | MAC | `aa:bb:cc:dd:ee:ff` | `00:DE:AD:00:00:01` | 40 |
 | Hostname | `db01.corp.local` | `HOST_01.example.internal` | 45 |
@@ -272,7 +276,7 @@ DECON's regex engine handles the heavy lifting, but regex can't catch everything
 
 The LLM never sees the original data. It only reviews what would already be safe to share. Large inputs are automatically truncated to avoid context overflow.
 
-The LLM prompt is deliberately aggressive ("flag everything"), and a deterministic post-filter strips known false positives: DECON's own placeholder patterns, common software/vendor names from service banners (Apache, OpenSSH, Ubuntu, etc.), and duplicate findings. This avoids relying on small models to make nuanced judgment calls.
+The LLM prompt is deliberately aggressive ("flag everything"), and a deterministic post-filter strips known false positives: DECON's own placeholder patterns (even when the LLM appends port numbers or context), common software/vendor names from service banners (Apache, OpenSSH, Ubuntu, etc.), timestamps from tool output, well-known public wordlist filenames (rockyou.txt, SecLists files, etc.), and duplicate findings. This avoids relying on small models to make nuanced judgment calls.
 
 ### Setting Up Ollama
 
