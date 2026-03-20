@@ -63,7 +63,6 @@ def _valid_ipv4(value: str) -> bool:
     return all(0 <= int(p) <= 255 for p in parts)
 
 
-
 def _luhn_check(value: str) -> bool:
     """Luhn algorithm for credit card validation."""
     digits = [int(d) for d in value if d.isdigit()]
@@ -99,6 +98,9 @@ _CIDR = re.compile(
 )
 
 # IPv6 — all standard forms (full, compressed, link-local with zone ID)
+# Note: bare :: (unspecified address) excluded to avoid false positives on
+# C++/Perl/Ruby scope resolution operators. ::1 and other :: with groups
+# are still matched.
 _IPV6 = re.compile(
     r"(?<![:\w])"
     r"(?:"
@@ -111,8 +113,7 @@ _IPV6 = re.compile(
     r"|(?:[0-9a-fA-F]{1,4}:){1,3}(?::[0-9a-fA-F]{1,4}){4}"      # N:: + 4 suffix
     r"|(?:[0-9a-fA-F]{1,4}:){1,2}(?::[0-9a-fA-F]{1,4}){5}"      # N:: + 5 suffix
     r"|[0-9a-fA-F]{1,4}:(?::[0-9a-fA-F]{1,4}){6}"               # 1:: + 6 suffix
-    r"|::(?:[0-9a-fA-F]{1,4}:){0,6}[0-9a-fA-F]{1,4}"            # leading ::
-    r"|::"                                                         # just ::
+    r"|::(?:[0-9a-fA-F]{1,4}:){0,6}[0-9a-fA-F]{1,4}"            # leading :: (at least one group)
     r")"
     r"(?![:\w])"
 )
@@ -168,7 +169,6 @@ _JWT = re.compile(
 # AWS access key (starts with AKIA, 20 chars)
 _AWS_KEY = re.compile(r"(?<![A-Z0-9])AKIA[0-9A-Z]{16}(?![A-Z0-9])")
 
-
 # URL (http:// and https://)
 _URL = re.compile(
     r"https?://"
@@ -195,6 +195,28 @@ _HOSTNAME_INTERNAL = re.compile(
     r"(?![.\w])"
 )
 
+# Private key blocks (PEM format)
+_PRIVATE_KEY = re.compile(
+    r"-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----"
+    r"[\s\S]*?"
+    r"-----END (?:[A-Z]+ )?PRIVATE KEY-----"
+)
+
+# NTLM hash pairs (LM:NT format, 32 hex chars each)
+_NTLM_HASH = re.compile(
+    r"(?<![0-9a-fA-F])[0-9a-fA-F]{32}:[0-9a-fA-F]{32}(?![0-9a-fA-F])"
+)
+
+# Active Directory DOMAIN\username (uppercase domain convention)
+_AD_DOMAIN_USER = re.compile(
+    r"(?<![\w\\])[A-Z][A-Z0-9._-]{0,14}\\[a-zA-Z0-9._-]+(?![\w\\])"
+)
+
+# UNC paths (\\server\share)
+_UNC_PATH = re.compile(
+    r"\\\\[a-zA-Z0-9._-]+(?:\\[a-zA-Z0-9._$-]+)+"
+)
+
 
 def _context_secret_apply(
     rule: Rule,
@@ -207,8 +229,6 @@ def _context_secret_apply(
 
     def _replace(match: re.Match[str]) -> str:
         value = match.group(2)
-        quote = match.group(1)
-
         # Skip values that are already placeholders from a prior rule
         if value in placeholder_values:
             full = match.group(0)
@@ -233,9 +253,46 @@ def _context_secret_apply(
     return rule.pattern.sub(_replace, text)
 
 
+def _cidr_apply(
+    rule: Rule,
+    text: str,
+    mapping: dict[str, str],
+    counters: dict[str, int],
+) -> str:
+    """Special handler for CIDR — preserves the original subnet mask."""
+    placeholder_values = set(mapping.values())
+
+    def _replace(match: re.Match[str]) -> str:
+        value = match.group(0)
+
+        if value in placeholder_values:
+            return value
+
+        if value in mapping:
+            return mapping[value]
+
+        _ip, mask = value.rsplit("/", 1)
+        cat = rule.category
+        n = counters.get(cat, 0) + 1
+        counters[cat] = n
+        placeholder = f"10.0.0.{n}/{mask}"
+        mapping[value] = placeholder
+        placeholder_values.add(placeholder)
+        return placeholder
+
+    return rule.pattern.sub(_replace, text)
+
+
 def build_default_rules() -> list[Rule]:
     """Return the default rule set, sorted by priority."""
     rules = [
+        Rule(
+            name="private_key",
+            category="private_key",
+            priority=5,
+            pattern=_PRIVATE_KEY,
+            placeholder_template="PRIVATE_KEY_REDACTED_{n:02d}",
+        ),
         Rule(
             name="jwt",
             category="jwt",
@@ -249,6 +306,13 @@ def build_default_rules() -> list[Rule]:
             priority=10,
             pattern=_AWS_KEY,
             placeholder_template="API_KEY_{n:02d}",
+        ),
+        Rule(
+            name="ntlm_hash",
+            category="ntlm_hash",
+            priority=12,
+            pattern=_NTLM_HASH,
+            placeholder_template="NTLM_HASH_{n:02d}",
         ),
         Rule(
             name="context_secret",
@@ -273,6 +337,20 @@ def build_default_rules() -> list[Rule]:
             validator=_luhn_check,
         ),
         Rule(
+            name="ad_domain_user",
+            category="ad_domain_user",
+            priority=25,
+            pattern=_AD_DOMAIN_USER,
+            placeholder_template="DOMAIN_USER_{n:02d}",
+        ),
+        Rule(
+            name="url",
+            category="url",
+            priority=28,
+            pattern=_URL,
+            placeholder_template="URL_REDACTED_{n:02d}",
+        ),
+        Rule(
             name="email",
             category="email",
             priority=30,
@@ -287,11 +365,11 @@ def build_default_rules() -> list[Rule]:
             placeholder_template="(555) 555-{n:04d}",
         ),
         Rule(
-            name="url",
-            category="url",
-            priority=35,
-            pattern=_URL,
-            placeholder_template="URL_REDACTED_{n:02d}",
+            name="unc_path",
+            category="unc_path",
+            priority=34,
+            pattern=_UNC_PATH,
+            placeholder_template="UNC_PATH_{n:02d}",
         ),
         Rule(
             name="cidr",
@@ -331,10 +409,14 @@ def build_default_rules() -> list[Rule]:
         ),
     ]
 
-    # Override apply for context_secret to use the special handler
+    # Override apply for rules with special handlers
     for r in rules:
         if r.name == "context_secret":
             r.apply = lambda text, mapping, counters, _r=r: _context_secret_apply(
+                _r, text, mapping, counters
+            )
+        elif r.name == "cidr":
+            r.apply = lambda text, mapping, counters, _r=r: _cidr_apply(
                 _r, text, mapping, counters
             )
 

@@ -48,6 +48,12 @@ decon --dry-run scan_results.txt
 
 # Show redaction stats on stderr
 decon -v scan_results.txt
+
+# Show unified diff of original vs redacted
+decon --diff scan_results.txt
+
+# Check if a file contains sensitive data (for CI/pre-commit)
+decon --check scan_results.txt && echo "clean" || echo "needs redaction"
 ```
 
 ## How It Works
@@ -67,14 +73,19 @@ Rules are applied in priority order to prevent partial matches (e.g., JWTs are m
 
 | Category | Example Input | Example Output | Priority |
 |----------|--------------|----------------|----------|
+| Private Key | `-----BEGIN RSA PRIVATE KEY-----...` | `PRIVATE_KEY_REDACTED_01` | 5 |
 | JWT | `eyJhbGciOi...` | `JWT_REDACTED_01` | 10 |
 | AWS Key | `AKIAIOSFODNN7EXAMPLE` | `API_KEY_01` | 10 |
+| NTLM Hash | `aad3b435...:31d6cfe0...` | `NTLM_HASH_01` | 12 |
 | Secrets | `api_key="sk_live_..."` | `api_key="SECRET_01"` | 15 |
 | SSN | `123-45-6789` | `SSN_REDACTED_01` | 20 |
 | Credit Card | `4111111111111111` | `CC_REDACTED_01` | 20 |
+| AD Domain\User | `CORP\jsmith` | `DOMAIN_USER_01` | 25 |
+| URL | `https://target.com/api` | `URL_REDACTED_01` | 28 |
 | Email | `admin@corp.com` | `user_01@example.com` | 30 |
 | Phone | `(555) 123-4567` | `(555) 555-0001` | 30 |
-| CIDR | `10.0.0.0/24` | `10.0.0.1/24` | 39 |
+| UNC Path | `\\dc01\SYSVOL` | `UNC_PATH_01` | 34 |
+| CIDR | `10.0.0.0/16` | `10.0.0.1/16` | 39 |
 | IPv4 | `192.168.1.50` | `10.0.0.1` | 40 |
 | IPv6 | `fe80::1` | `fd00::1` | 40 |
 | MAC | `aa:bb:cc:dd:ee:ff` | `00:DE:AD:00:00:01` | 40 |
@@ -82,7 +93,15 @@ Rules are applied in priority order to prevent partial matches (e.g., JWTs are m
 
 Context-anchored secrets (priority 15) preserve the label and only redact the value — `password=Hunter2` becomes `password=SECRET_01`, so the LLM knows a password was there without seeing the actual credential.
 
+CIDR notation preserves the original subnet mask — `10.0.0.0/16` becomes `10.0.0.1/16`, not `/24`.
+
 Credit card detection uses Luhn validation to avoid false positives on random digit sequences.
+
+NTLM hashes match the LM:NT format from tools like Impacket's `secretsdump.py`.
+
+AD domain\user patterns match uppercase domain conventions (`CORP\jsmith`, `CONTOSO.LOCAL\admin`).
+
+Private key blocks match PEM format (`-----BEGIN * PRIVATE KEY-----` through `-----END * PRIVATE KEY-----`), covering RSA, EC, DSA, and OPENSSH key types.
 
 ```bash
 decon --list-rules          # show all rules with status
@@ -105,7 +124,7 @@ Config location:
 
 Same path on both — `--init-config` creates the directory if it doesn't exist. Works the same whether installed via `pipx`, `uv tool`, or a local venv.
 
-Config supports global rule toggles, profiles for different audiences, custom literal values, and custom regex patterns:
+Config supports global rule toggles, profiles for different audiences, custom literal values, custom regex patterns, target domains, and allowlists:
 
 ```toml
 default_profile = "standard"
@@ -118,6 +137,8 @@ mac = false           # disable globally
 [custom]
 values = ["ACME Corp", "Project Nighthawk"]          # case-sensitive
 values_nocase = ["jsmith", "proddb"]                  # case-insensitive
+target_domains = ["contoso.com", "acmecorp.org"]      # auto-generates hostname rules
+allowlist = ["scanme.nmap.org"]                        # pass through unredacted
 
 [[custom.patterns]]
 name = "internal_domains"
@@ -137,9 +158,38 @@ Resolution order: global `[rules]` -> profile overrides -> CLI `--enable`/`--dis
 
 ```bash
 decon -p client-share report.txt    # use a specific profile
+DECON_PROFILE=client-share decon report.txt   # or via env var
 ```
 
 See `config.example.toml` for a complete reference.
+
+### Target Domains
+
+The built-in hostname rule only catches internal TLDs (`.corp`, `.internal`, `.local`, etc.). Real engagements have targets like `dc01.contoso.com` or `mail.acmecorp.org`. Add them to `target_domains` and DECON auto-generates hostname rules that match the bare domain and any subdomain:
+
+```toml
+[custom]
+target_domains = ["contoso.com", "acmecorp.org"]
+```
+
+This matches `contoso.com`, `dc01.contoso.com`, `mail.internal.contoso.com`, etc. — all mapped to `HOST_XX.example.internal` placeholders.
+
+### Allowlist
+
+Values you want to pass through unredacted:
+
+```toml
+[custom]
+allowlist = ["scanme.nmap.org", "10.0.0.1"]
+```
+
+Or via CLI:
+
+```bash
+decon --allow "scanme.nmap.org,10.0.0.1" pentest.log
+```
+
+Allowlisted values are exact matches on what the regex captures.
 
 ## Cross-File Consistency
 
@@ -153,11 +203,74 @@ decon --import-map map.json --export-map map.json scan3.txt > clean3.txt
 
 The mapping file is JSON — `10.4.12.50` maps to `10.0.0.1` in every file.
 
+### Batch Mode
+
+Process multiple files at once, writing each to an output directory with a shared mapping:
+
+```bash
+decon *.txt --output-dir clean/
+# creates clean/scan1.redacted.txt, clean/scan2.redacted.txt, etc.
+
+# With cross-file mapping export
+decon *.txt --output-dir clean/ --export-map map.json
+```
+
+### Reverse Redaction
+
+After LLM analysis, restore original values using the exported mapping:
+
+```bash
+# Redact and save mapping
+decon --export-map map.json pentest.log > clean.log
+
+# ... paste clean.log into LLM, get analysis back ...
+
+# Restore original values in the LLM's response
+echo "The issue is on 10.0.0.1 port 443" | decon --unredact map.json
+# → "The issue is on 10.4.12.50 port 443"
+```
+
+## CI / Pre-Commit Check
+
+Use `--check` to verify files are clean before sharing. Exits 0 if no redactions needed, 1 if sensitive data found:
+
+```bash
+decon --check report.txt && echo "safe to share" || echo "contains sensitive data"
+```
+
+Output includes a category breakdown on stderr:
+
+```
+Found 5 value(s) to redact:
+  email: 1
+  ipv4: 3
+  secret: 1
+```
+
+## Diff Mode
+
+See exactly what would change before committing to a redaction:
+
+```bash
+decon --diff pentest.log
+```
+
+```diff
+--- original
++++ redacted
+@@ -1,3 +1,3 @@
+-Server 10.4.12.50 is up
++Server 10.0.0.1 is up
+ Port 443/tcp open
+-Contact admin@corp.com
++Contact user_01@example.com
+```
+
 ## LLM Safety Net
 
 DECON's regex engine handles the heavy lifting, but regex can't catch everything — a client name mentioned conversationally, an implied project reference, or a non-standard credential format. The optional LLM pass acts as a **reviewer, not a redactor**. It receives the already-redacted text and flags anything suspicious that the regex missed.
 
-The LLM never sees the original data. It only reviews what would already be safe to share.
+The LLM never sees the original data. It only reviews what would already be safe to share. Large inputs are automatically truncated to avoid context overflow.
 
 ### Setting Up Ollama
 
@@ -333,7 +446,10 @@ After an engagement, sanitize all captures in bulk with a consistent mapping acr
 ```bash
 cd /workspace/10.10.10.5
 
-# Sanitize recon/ captures with cross-file consistency
+# Batch mode — consistent mapping across all files
+decon recon/*.txt --output-dir clean/ --export-map map.json
+
+# Or manually with cross-file consistency
 for f in recon/*.txt; do
     decon --import-map map.json --export-map map.json "$f" > "clean/$(basename $f)"
 done
@@ -431,22 +547,37 @@ Input:
 Output:
   -c, --clipboard       Copy to clipboard
   -o, --output FILE     Write to file
+  --output-dir DIR      Write redacted files to directory (one per input file)
   (default)             stdout
+
+Rules:
+  --enable RULES        Enable rules (comma-separated)
+  --disable RULES       Disable rules (comma-separated)
+  --allow VALUES        Pass values through unredacted (comma-separated)
+  --list-rules          Show all rules and status
+
+Modes:
+  --dry-run             Show what would be redacted
+  --check               Exit non-zero if redactions needed (for CI)
+  --diff                Show unified diff of original vs redacted
+  --unredact MAP_FILE   Reverse redaction using a mapping file
+
+Mapping:
+  --export-map FILE     Save mapping to JSON
+  --import-map FILE     Load prior mapping for cross-file consistency
 
 Options:
   -p, --profile NAME    Config profile (default: "standard")
-  --enable RULES        Enable rules (comma-separated)
-  --disable RULES       Disable rules (comma-separated)
   --llm                 Local LLM safety check via Ollama
-  --export-map FILE     Save mapping to JSON
-  --import-map FILE     Load prior mapping
-  --dry-run             Show what would be redacted
-  --list-rules          Show all rules and status
   --init-config         Create default config file
   -q, --quiet           Suppress stderr messages
   -v, --verbose         Show redaction stats
   --version             Show version
 ```
+
+Environment variables:
+- `DECON_LLM=1` — enable LLM review (same as `--llm`)
+- `DECON_PROFILE=name` — set config profile (same as `-p name`)
 
 ## License
 

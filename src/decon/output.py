@@ -12,77 +12,50 @@ def write_stdout(text: str) -> None:
     sys.stdout.flush()
 
 
-def write_file(text: str, path: str) -> None:
+def write_file(text: str, path: str, quiet: bool = False) -> None:
     """Write redacted text to a file."""
     with open(path, "w") as f:
         f.write(text)
-    print(f"Written to {path}", file=sys.stderr)
+    if not quiet:
+        print(f"Written to {path}", file=sys.stderr)
 
 
 def write_clipboard(text: str) -> None:
     """Copy redacted text to system clipboard."""
-    try:
-        proc = subprocess.run(
-            ["pbcopy"],
-            input=text.encode(),
-            check=True,
-            capture_output=True,
-        )
-    except FileNotFoundError:
-        # Try xclip/xsel on Linux
+    for cmd in [
+        ["pbcopy"],
+        ["wl-copy"],
+        ["xclip", "-selection", "clipboard"],
+        ["xsel", "--clipboard", "--input"],
+    ]:
         try:
-            proc = subprocess.run(
-                ["xclip", "-selection", "clipboard"],
-                input=text.encode(),
-                check=True,
-                capture_output=True,
-            )
+            subprocess.run(cmd, input=text.encode(), check=True, capture_output=True)
+            print("Copied to clipboard", file=sys.stderr)
+            return
         except FileNotFoundError:
-            try:
-                proc = subprocess.run(
-                    ["xsel", "--clipboard", "--input"],
-                    input=text.encode(),
-                    check=True,
-                    capture_output=True,
-                )
-            except FileNotFoundError:
-                print(
-                    "No clipboard tool found (pbcopy/xclip/xsel)",
-                    file=sys.stderr,
-                )
-                return
-    print("Copied to clipboard", file=sys.stderr)
+            continue
+        except subprocess.CalledProcessError:
+            continue
+    print("No clipboard tool found (pbcopy/wl-copy/xclip/xsel)", file=sys.stderr)
 
 
 def read_clipboard() -> str:
     """Read text from system clipboard."""
-    try:
-        result = subprocess.run(
-            ["pbpaste"], capture_output=True, check=True
-        )
-        return result.stdout.decode()
-    except FileNotFoundError:
+    for cmd in [
+        ["pbpaste"],
+        ["wl-paste"],
+        ["xclip", "-selection", "clipboard", "-o"],
+        ["xsel", "--clipboard", "--output"],
+    ]:
         try:
-            result = subprocess.run(
-                ["xclip", "-selection", "clipboard", "-o"],
-                capture_output=True,
-                check=True,
-            )
+            result = subprocess.run(cmd, capture_output=True, check=True)
             return result.stdout.decode()
         except FileNotFoundError:
-            try:
-                result = subprocess.run(
-                    ["xsel", "--clipboard", "--output"],
-                    capture_output=True,
-                    check=True,
-                )
-                return result.stdout.decode()
-            except FileNotFoundError:
-                print(
-                    "No clipboard tool found (pbpaste/xclip/xsel)",
-                    file=sys.stderr,
-                )
-                return ""
+            continue
+        except subprocess.CalledProcessError:
+            continue
+    print("No clipboard tool found (pbpaste/wl-paste/xclip/xsel)", file=sys.stderr)
+    return ""
 
 
 def capture_tmux_pane() -> str:
