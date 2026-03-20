@@ -26,11 +26,18 @@ class Rule:
         counters: dict[str, int],
     ) -> str:
         """Apply this rule to text, updating mapping and counters."""
+        # Build reverse lookup of existing placeholder values so we never
+        # re-redact a placeholder produced by an earlier rule.
+        placeholder_values = set(mapping.values())
 
         def _replace(match: re.Match[str]) -> str:
             value = match.group(0)
 
             if self.validator and not self.validator(value):
+                return value
+
+            # Skip values that are already placeholders from a prior rule
+            if value in placeholder_values:
                 return value
 
             if value in mapping:
@@ -42,6 +49,7 @@ class Rule:
 
             placeholder = self.placeholder_template.format(n=n)
             mapping[value] = placeholder
+            placeholder_values.add(placeholder)
             return placeholder
 
         return self.pattern.sub(_replace, text)
@@ -183,10 +191,16 @@ def _context_secret_apply(
     counters: dict[str, int],
 ) -> str:
     """Special handler for context-anchored secrets — redacts only the value part."""
+    placeholder_values = set(mapping.values())
 
     def _replace(match: re.Match[str]) -> str:
         value = match.group(2)
         quote = match.group(1)
+
+        # Skip values that are already placeholders from a prior rule
+        if value in placeholder_values:
+            full = match.group(0)
+            return full
 
         if value in mapping:
             placeholder = mapping[value]
@@ -196,6 +210,7 @@ def _context_secret_apply(
             counters[cat] = n
             placeholder = rule.placeholder_template.format(n=n)
             mapping[value] = placeholder
+            placeholder_values.add(placeholder)
 
         # Rebuild the full match with only the value replaced
         full = match.group(0)
