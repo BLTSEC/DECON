@@ -1,7 +1,7 @@
 # DECON
 
 <p align="center">
-  <img src="assets/decon.jpg" alt="decon" width="600">
+  <img src="assets/decon.jpg" alt="decon" width="100%">
 </p>
 
 Sanitize operational data before sharing. Consistent placeholders preserve analytical value.
