@@ -80,7 +80,7 @@ Rules are applied in priority order to prevent partial matches (e.g., JWTs are m
 | Secrets | `api_key="sk_live_..."` | `api_key="SECRET_01"` | 15 |
 | SSN | `123-45-6789` | `SSN_REDACTED_01` | 20 |
 | Credit Card | `4111111111111111` | `CC_REDACTED_01` | 20 |
-| AD Domain\User | `CORP\jsmith` | `DOMAIN_USER_01` | 25 |
+| AD Domain\User | `CORP\jsmith:P@ssw0rd` | `DOMAIN_USER_01` | 25 |
 | URL | `https://target.com/api` | `URL_REDACTED_01` | 28 |
 | Email | `admin@corp.com` | `user_01@example.com` | 30 |
 | Phone | `(555) 123-4567` | `(555) 555-0001` | 30 |
@@ -99,7 +99,7 @@ Credit card detection uses Luhn validation to avoid false positives on random di
 
 NTLM hashes match the LM:NT format from tools like Impacket's `secretsdump.py`.
 
-AD domain\user patterns match uppercase domain conventions (`CORP\jsmith`, `CONTOSO.LOCAL\admin`).
+AD domain\user patterns match both uppercase short domains (`CORP\jsmith`) and FQDN domains (`megacorp.local\svc_bes`). When credentials follow the username (`domain\user:password`), the password is captured too — common in netexec/crackmapexec output.
 
 Private key blocks match PEM format (`-----BEGIN * PRIVATE KEY-----` through `-----END * PRIVATE KEY-----`), covering RSA, EC, DSA, and OPENSSH key types.
 
@@ -268,9 +268,11 @@ decon --diff pentest.log
 
 ## LLM Safety Net
 
-DECON's regex engine handles the heavy lifting, but regex can't catch everything — a client name mentioned conversationally, an implied project reference, or a non-standard credential format. The optional LLM pass acts as a **reviewer, not a redactor**. It receives the already-redacted text and flags anything suspicious that the regex missed.
+DECON's regex engine handles the heavy lifting, but regex can't catch everything — a client name mentioned conversationally, a bare username, or a non-standard credential format. The optional LLM pass acts as a **reviewer, not a redactor**. It receives the already-redacted text and flags anything suspicious that the regex missed.
 
 The LLM never sees the original data. It only reviews what would already be safe to share. Large inputs are automatically truncated to avoid context overflow.
+
+The LLM prompt is deliberately aggressive ("flag everything"), and a deterministic post-filter strips known false positives: DECON's own placeholder patterns, common software/vendor names from service banners (Apache, OpenSSH, Ubuntu, etc.), and duplicate findings. This avoids relying on small models to make nuanced judgment calls.
 
 ### Setting Up Ollama
 
