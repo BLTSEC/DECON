@@ -47,9 +47,11 @@ hostnames, IPs, URLs, emails, usernames, person names, company names, \
 or credentials are leaks — even well-known public ones like nmap.org \
 or scanme.nmap.org.
 
-Do NOT flag software names, version strings, or vendor names that appear \
-in service banners or tool output (e.g., Apache, OpenSSH, Ubuntu, Linux, \
-Nmap, NLnet Labs). These are findings, not target identifiers.
+Do NOT flag generic software names, version strings, OS names, or \
+protocol names from service banners (e.g., Apache, OpenSSH, Ubuntu, \
+Linux, Windows, NSD). These describe what is running, not who owns it. \
+DO still flag any real domain or hostname, even if it contains a tool \
+name (e.g., scanme.nmap.org is a real hostname and IS a leak).
 
 Reply CLEAN if nothing found. Otherwise one FOUND: per line. No explanation.
 
