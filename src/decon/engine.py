@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 
 from decon.patterns import Rule, build_default_rules
@@ -18,6 +19,7 @@ class RedactionEngine:
     rules: list[Rule] = field(default_factory=build_default_rules)
     mapping: dict[str, str] = field(default_factory=dict)
     counters: dict[str, int] = field(default_factory=dict)
+    allowlist: set[str] = field(default_factory=set)
 
     def redact(self, text: str) -> str:
         """Redact sensitive data from text using all enabled rules."""
@@ -25,6 +27,15 @@ class RedactionEngine:
             if not rule.enabled:
                 continue
             text = rule.apply(text, self.mapping, self.counters)
+        return text
+
+    def unredact(self, text: str) -> str:
+        """Replace placeholders with original values using reverse mapping."""
+        reverse = {v: k for k, v in self.mapping.items()
+                   if v != k}  # skip allowlist identity mappings
+        # Sort by length (longest first) to avoid partial replacements
+        for placeholder in sorted(reverse, key=len, reverse=True):
+            text = text.replace(placeholder, reverse[placeholder])
         return text
 
     def enable_rule(self, name: str) -> None:
@@ -43,12 +54,16 @@ class RedactionEngine:
                 return
         raise ValueError(f"Unknown rule: {name}")
 
+    def add_allowlist(self, values: list[str]) -> None:
+        """Add values to the allowlist (they will pass through unredacted)."""
+        for value in values:
+            self.allowlist.add(value)
+            self.mapping[value] = value  # identity mapping
+
     def add_custom_values(
         self, values: list[str], case_sensitive: bool = True
     ) -> None:
         """Add custom literal values to redact."""
-        import re
-
         for value in values:
             flags = 0 if case_sensitive else re.IGNORECASE
             pattern = re.compile(re.escape(value), flags)
@@ -69,8 +84,6 @@ class RedactionEngine:
         replacement: str = "REDACTED_{n:02d}",
     ) -> None:
         """Add a custom regex pattern rule."""
-        import re
-
         rule = Rule(
             name=name,
             category="custom",
@@ -79,6 +92,26 @@ class RedactionEngine:
             placeholder_template=replacement,
         )
         self.rules.append(rule)
+        self.rules.sort(key=lambda r: r.priority)
+
+    def add_target_domains(self, domains: list[str]) -> None:
+        """Add target domain rules that match any subdomain."""
+        for domain in domains:
+            escaped = re.escape(domain)
+            pattern = re.compile(
+                r"(?<![.\w])"
+                r"(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*"
+                + escaped
+                + r"(?![.\w])"
+            )
+            rule = Rule(
+                name=f"target_{domain}",
+                category="hostname",
+                priority=44,
+                pattern=pattern,
+                placeholder_template="HOST_{n:02d}.example.internal",
+            )
+            self.rules.append(rule)
         self.rules.sort(key=lambda r: r.priority)
 
     def export_map(self, path: str) -> None:

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import os
 import sys
+from pathlib import Path
 
 from decon import __version__
 from decon.engine import RedactionEngine
@@ -69,6 +71,11 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="FILE",
         help="Write output to file",
     )
+    output_group.add_argument(
+        "--output-dir",
+        metavar="DIR",
+        help="Write redacted files to directory (one per input file)",
+    )
 
     # Options
     parser.add_argument(
@@ -88,6 +95,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Disable rules (comma-separated)",
     )
     parser.add_argument(
+        "--allow",
+        metavar="VALUES",
+        help="Values to pass through unredacted (comma-separated)",
+    )
+    parser.add_argument(
         "--llm",
         action="store_true",
         help="Local LLM safety check via Ollama",
@@ -103,9 +115,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Load prior mapping for cross-file consistency",
     )
     parser.add_argument(
+        "--unredact",
+        metavar="MAP_FILE",
+        help="Reverse redaction using a mapping file",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Show what would be redacted",
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Exit non-zero if redactions needed (for CI/pre-commit)",
+    )
+    parser.add_argument(
+        "--diff",
+        action="store_true",
+        help="Show unified diff of original vs redacted",
     )
     parser.add_argument(
         "--list-rules",
@@ -133,6 +160,26 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _validate_args(args: argparse.Namespace) -> str | None:
+    """Return an error message if args are invalid, or None if OK."""
+    # Mutual exclusion: output destinations
+    if args.output and args.output_dir:
+        return "--output and --output-dir cannot be used together"
+
+    # Mutual exclusion: modes
+    modes = [args.dry_run, args.check, args.diff]
+    if args.unredact:
+        modes.append(True)
+    if sum(modes) > 1:
+        return "--dry-run, --check, --diff, and --unredact are mutually exclusive"
+
+    # --output-dir requires files
+    if args.output_dir and not args.files:
+        return "--output-dir requires file arguments"
+
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -142,14 +189,21 @@ def main(argv: list[str] | None = None) -> int:
         init_config()
         return 0
 
+    # Validate argument combinations
+    err = _validate_args(args)
+    if err:
+        print(f"Error: {err}", file=sys.stderr)
+        return 1
+
     # Load config
     config = load_config()
 
     # Build engine
     engine = RedactionEngine()
 
-    # Apply config
-    apply_config_to_engine(engine, config, args.profile)
+    # Apply config (profile from arg, env var, or config default)
+    profile = args.profile or os.environ.get("DECON_PROFILE")
+    apply_config_to_engine(engine, config, profile)
 
     # --list-rules: show rules and exit
     if args.list_rules:
@@ -180,38 +234,93 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"Unknown rule: {name}", file=sys.stderr)
                 return 1
 
+    # Allowlist
+    if args.allow:
+        engine.add_allowlist([v.strip() for v in args.allow.split(",")])
+
     # Import prior mapping
     if args.import_map:
-        engine.import_map(args.import_map)
+        try:
+            engine.import_map(args.import_map)
+        except (OSError, ValueError) as e:
+            print(f"Error loading map {args.import_map}: {e}", file=sys.stderr)
+            return 1
+
+    # --unredact mode: reverse redaction using mapping file
+    if args.unredact:
+        try:
+            engine.import_map(args.unredact)
+        except (OSError, ValueError) as e:
+            print(f"Error loading map {args.unredact}: {e}", file=sys.stderr)
+            return 1
+        text = _read_input(args)
+        if text is None:
+            return 1
+        result = engine.unredact(text)
+        _write_output(args, result)
+        return 0
+
+    # --output-dir mode: batch process files
+    if args.output_dir:
+        return _batch_process(args, engine, config)
 
     # Gather input
     text = _read_input(args)
     if text is None:
         return 1
 
+    # Snapshot mapping size to detect new redactions (ignores allowlist/imported entries)
+    mapping_before = len(engine.mapping)
+
     # Redact
     result = engine.redact(text)
 
+    new_redactions = len(engine.mapping) - mapping_before
+
+    # --check mode: exit non-zero if new redactions found
+    if args.check:
+        if new_redactions > 0:
+            stats = engine.get_stats()
+            total = sum(stats.values())
+            print(f"Found {total} value(s) to redact:", file=sys.stderr)
+            for cat, count in sorted(stats.items()):
+                print(f"  {cat}: {count}", file=sys.stderr)
+            return 1
+        if not args.quiet:
+            print("Clean — no redactions needed.", file=sys.stderr)
+        return 0
+
     # --dry-run: show mapping instead of output
     if args.dry_run:
-        if not engine.mapping:
+        if new_redactions == 0:
             print("No redactions found.", file=sys.stderr)
         else:
             print("Redactions that would be applied:", file=sys.stderr)
             for real, placeholder in sorted(
                 engine.mapping.items(), key=lambda x: x[1]
             ):
+                # Skip allowlist identity mappings
+                if real == placeholder:
+                    continue
                 print(f"  {real} -> {placeholder}", file=sys.stderr)
         return 0
 
+    # --diff: show unified diff
+    if args.diff:
+        diff = difflib.unified_diff(
+            text.splitlines(keepends=True),
+            result.splitlines(keepends=True),
+            fromfile="original",
+            tofile="redacted",
+        )
+        sys.stdout.writelines(diff)
+        return 0
+
     # LLM review
-    use_llm = args.llm or os.environ.get("DECON_LLM") == "1"
-    if not use_llm:
-        llm_cfg = get_llm_config(config)
-        use_llm = llm_cfg.get("enabled", False)
+    llm_cfg = get_llm_config(config)
+    use_llm = args.llm or os.environ.get("DECON_LLM") == "1" or llm_cfg.get("enabled", False)
 
     if use_llm:
-        llm_cfg = get_llm_config(config)
         review = llm_review(
             result,
             model=llm_cfg.get("model", "qwen3.5:9b"),
@@ -224,20 +333,67 @@ def main(argv: list[str] | None = None) -> int:
             print("---", file=sys.stderr)
 
     # Output
+    _write_output(args, result)
+
+    # Export mapping
+    _export_map(args, engine)
+
+    # Verbose stats
+    _print_stats(args, engine)
+
+    return 0
+
+
+def _write_output(args: argparse.Namespace, result: str) -> None:
+    """Write result to the configured output destination."""
     if args.output:
-        write_file(result, args.output)
+        write_file(result, args.output, quiet=args.quiet)
     elif args.clipboard:
         write_clipboard(result)
     else:
         write_stdout(result)
 
-    # Export mapping
+
+def _export_map(args: argparse.Namespace, engine: RedactionEngine) -> None:
+    """Export mapping if requested."""
     if args.export_map:
-        engine.export_map(args.export_map)
+        try:
+            engine.export_map(args.export_map)
+        except OSError as e:
+            print(f"Error writing map {args.export_map}: {e}", file=sys.stderr)
+            return
         if not args.quiet:
             print(f"Mapping exported to {args.export_map}", file=sys.stderr)
 
-    # Verbose stats
+
+def _batch_process(
+    args: argparse.Namespace,
+    engine: RedactionEngine,
+    config: dict,
+) -> int:
+    """Process multiple files, writing each to output-dir."""
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    for path in args.files:
+        try:
+            with open(path) as f:
+                text = f.read()
+        except OSError as e:
+            print(f"Error reading {path}: {e}", file=sys.stderr)
+            return 1
+
+        result = engine.redact(text)
+        p = Path(path)
+        out_path = Path(args.output_dir) / f"{p.stem}.redacted{p.suffix}"
+        write_file(result, str(out_path), quiet=args.quiet)
+
+    _export_map(args, engine)
+    _print_stats(args, engine)
+    return 0
+
+
+def _print_stats(args: argparse.Namespace, engine: RedactionEngine) -> None:
+    """Print verbose stats if requested."""
     if args.verbose and not args.quiet:
         stats = engine.get_stats()
         if stats:
@@ -246,8 +402,6 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"  {cat}: {count}", file=sys.stderr)
         else:
             print("No redactions performed.", file=sys.stderr)
-
-    return 0
 
 
 def _read_input(args: argparse.Namespace) -> str | None:

@@ -8,6 +8,9 @@ import sys
 import urllib.request
 import urllib.error
 
+# Maximum characters to send to the LLM (avoids context overflow on large files)
+MAX_LLM_CHARS = 12000
+
 # Patterns that match DECON's own placeholder values
 _PLACEHOLDER_RE = re.compile(
     r"^(?:"
@@ -23,6 +26,11 @@ _PLACEHOLDER_RE = re.compile(
     r"|URL_REDACTED_\d+"        # URL placeholders
     r"|SSN_REDACTED_\d+"        # SSN placeholders
     r"|CC_REDACTED_\d+"         # credit card placeholders
+    r"|NTLM_HASH_\d+"          # NTLM hash placeholders
+    r"|DOMAIN_USER_\d+"         # AD domain\user placeholders
+    r"|UNC_PATH_\d+"            # UNC path placeholders
+    r"|PRIVATE_KEY_REDACTED_\d+"  # private key placeholders
+    r"|REDACTED_\d+"            # custom value placeholders
     r"|\(555\) 555-\d+"        # phone placeholders
     r")$"
 )
@@ -31,7 +39,8 @@ _PLACEHOLDER_RE = re.compile(
 REVIEW_PROMPT = """\
 This is redacted pentest output. Placeholders (10.0.0.X, fd00::X, \
 user_XX@example.com, HOST_XX.example.internal, SECRET_XX, \
-URL_REDACTED_XX, etc.) are SAFE — ignore them completely.
+URL_REDACTED_XX, NTLM_HASH_XX, DOMAIN_USER_XX, UNC_PATH_XX, \
+PRIVATE_KEY_REDACTED_XX, etc.) are SAFE — ignore them completely.
 
 Flag ANY real-world value that survived redaction. Every real domain, \
 hostname, IP, URL, email, username, person/company/project name, or \
@@ -72,11 +81,21 @@ def llm_review(
 
     Returns the LLM's response, or None if Ollama is unavailable.
     """
+    # Truncate to avoid context overflow
+    review_text = text
+    if len(text) > MAX_LLM_CHARS:
+        review_text = text[:MAX_LLM_CHARS] + "\n\n[... truncated ...]"
+        if not quiet:
+            print(
+                f"Warning: text truncated to {MAX_LLM_CHARS} chars for LLM review",
+                file=sys.stderr,
+            )
+
     url = f"{host}/api/chat"
     payload = json.dumps({
         "model": model,
         "messages": [
-            {"role": "user", "content": REVIEW_PROMPT.format(text=text)},
+            {"role": "user", "content": REVIEW_PROMPT.format(text=review_text)},
         ],
         "stream": False,
         "think": False,

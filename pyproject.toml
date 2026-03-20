@@ -4,19 +4,34 @@ build-backend = "hatchling.build"
 
 [project]
 name = "decon"
-version = "0.1.0"
+version = "0.2.0"
 description = "Sanitize operational data before sharing. Consistent placeholders preserve analytical value."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11"
 dependencies = []
+keywords = ["redaction", "sanitization", "pentest", "security", "privacy", "pii"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Security",
+    "Topic :: Utilities",
+]
 
 [project.scripts]
 decon = "decon.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/BLTSEC/decon"
-Repository = "https://github.com/BLTSEC/decon"
+Homepage = "https://github.com/BLTSEC/DECON"
+Repository = "https://github.com/BLTSEC/DECON"
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]

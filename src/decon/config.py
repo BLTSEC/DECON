@@ -25,10 +25,12 @@ host = "http://localhost:11434"
 [custom]
 values = []          # case-sensitive literal strings
 values_nocase = []   # case-insensitive literal strings
+allowlist = []       # values to pass through unredacted
+target_domains = []  # target domains — auto-generates hostname rules
 
 # [[custom.patterns]]
 # name = "internal_domains"
-# pattern = '[a-z0-9-]+\\.corp\\.example\\.com'
+# pattern = '[a-z0-9-]+\\\\.corp\\\\.example\\\\.com'
 # replacement = "HOST_{n:02d}.example.internal"
 
 # [profiles.client-share]
@@ -89,6 +91,16 @@ def apply_config_to_engine(engine, config: dict, profile: str | None = None) -> 
             pattern=pat["pattern"],
             replacement=pat.get("replacement", "REDACTED_{n:02d}"),
         )
+
+    # Target domains
+    target_domains = custom.get("target_domains", [])
+    if target_domains:
+        engine.add_target_domains(target_domains)
+
+    # Allowlist
+    allowlist = custom.get("allowlist", [])
+    if allowlist:
+        engine.add_allowlist(allowlist)
 
     # Profile-specific extra values
     if profile and profile != "standard":
