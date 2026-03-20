@@ -207,9 +207,18 @@ _NTLM_HASH = re.compile(
     r"(?<![0-9a-fA-F])[0-9a-fA-F]{32}:[0-9a-fA-F]{32}(?![0-9a-fA-F])"
 )
 
-# Active Directory DOMAIN\username (uppercase domain convention)
+# Active Directory domain\username with optional :password
+# Matches uppercase short domains (CORP\user) and FQDN domains (megacorp.local\user).
+# Optional :password captures credentials in tool output (netexec, crackmapexec).
 _AD_DOMAIN_USER = re.compile(
-    r"(?<![\w\\])[A-Z][A-Z0-9._-]{0,14}\\[a-zA-Z0-9._-]+(?![\w\\])"
+    r"(?<![\w\\])"
+    r"(?:"
+    r"[A-Z][A-Z0-9._-]{0,14}"                          # CORP, CONTOSO.LOCAL
+    r"|[a-zA-Z0-9](?:[a-zA-Z0-9-]*\.)+[a-zA-Z]{2,}"    # megacorp.local (FQDN)
+    r")"
+    r"\\[a-zA-Z0-9._-]+"                                # \username
+    r"(?::[^\s]{4,})?"                                   # optional :password
+    r"(?![\w\\])"
 )
 
 # UNC paths (\\server\share)

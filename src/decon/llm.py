@@ -42,16 +42,10 @@ user_XX@example.com, HOST_XX.example.internal, SECRET_XX, \
 URL_REDACTED_XX, NTLM_HASH_XX, DOMAIN_USER_XX, UNC_PATH_XX, \
 PRIVATE_KEY_REDACTED_XX, etc.) are SAFE — ignore them completely.
 
-Flag ANY real-world value that survived redaction. Real domains, \
-hostnames, IPs, URLs, emails, usernames, person names, company names, \
-or credentials are leaks — even well-known public ones like nmap.org \
-or scanme.nmap.org.
-
-Do NOT flag generic software names, version strings, OS names, or \
-protocol names from service banners (e.g., Apache, OpenSSH, Ubuntu, \
-Linux, Windows, NSD). These describe what is running, not who owns it. \
-DO still flag any real domain or hostname, even if it contains a tool \
-name (e.g., scanme.nmap.org is a real hostname and IS a leak).
+Flag ANY real-world value that survived redaction. Every real domain, \
+hostname, IP, URL, email, username, person/company/project name, or \
+credential is a leak — even well-known public ones like nmap.org or \
+scanme.nmap.org. If it is not a placeholder, it should have been redacted.
 
 Reply CLEAN if nothing found. Otherwise one FOUND: per line. No explanation.
 
@@ -60,18 +54,76 @@ Reply CLEAN if nothing found. Otherwise one FOUND: per line. No explanation.
 ---"""
 
 
+# Software/vendor/OS names commonly found in service banners and tool output.
+# These are findings (what is running), not target identifiers (who owns it).
+# Post-filtered because the LLM prompt is deliberately aggressive ("flag everything")
+# and small models can't reliably distinguish software names from real leaks.
+_SAFE_SOFTWARE = {
+    # Web servers
+    "apache", "apache httpd", "nginx", "iis", "tomcat", "lighttpd", "httpd",
+    "caddy", "gunicorn", "uvicorn",
+    # SSH / remote access
+    "openssh", "dropbear", "putty",
+    # Operating systems
+    "ubuntu", "debian", "centos", "fedora", "kali", "alpine", "rhel",
+    "red hat", "suse", "arch linux", "gentoo", "slackware",
+    "linux", "windows", "windows server", "macos", "freebsd", "openbsd",
+    "unix", "solaris",
+    # Vendors / orgs in banners
+    "microsoft", "nlnet labs", "nsd", "isc", "isc bind", "bind",
+    "nmap", "nmap project",
+    # Databases
+    "mysql", "postgresql", "mariadb", "mongodb", "redis", "mssql",
+    "sql server", "oracle", "sqlite", "cassandra", "elasticsearch",
+    # Languages / runtimes
+    "php", "python", "java", "node.js", "ruby", "perl", "go", ".net",
+    # CI / infra tools
+    "jenkins", "grafana", "gitlab", "docker", "kubernetes", "ansible",
+    "terraform", "prometheus", "nagios", "zabbix",
+    # CMS / web apps
+    "wordpress", "drupal", "joomla",
+    # Protocols
+    "ssl", "tls", "http", "https", "ftp", "smtp", "dns", "ldap",
+    "kerberos", "smb", "rdp", "vnc", "snmp", "ntp",
+    # Security tools (appear in output headers)
+    "gobuster", "metasploit", "burp", "nessus", "openvas", "nikto",
+    "sqlmap", "hydra", "john", "hashcat", "responder", "bloodhound",
+    "mimikatz", "crackmapexec", "netexec", "impacket", "certipy",
+    "smbclient", "rpcclient", "enum4linux", "linpeas", "winpeas",
+}
+
+
+def _is_safe_software(value: str) -> bool:
+    """Check if a flagged value is a known software/vendor name."""
+    normalized = value.lower().strip()
+    if normalized in _SAFE_SOFTWARE:
+        return True
+    # Also check if the value is "Name vX.Y.Z" (software + version)
+    parts = normalized.split()
+    if len(parts) >= 2 and parts[0] in _SAFE_SOFTWARE:
+        return True
+    return False
+
+
 def _filter_placeholder_findings(response: str) -> str:
-    """Remove FOUND: lines that reference DECON's own placeholders."""
+    """Remove FOUND: lines that reference placeholders or safe software names."""
     lines = []
+    seen_findings: set[str] = set()
     for line in response.splitlines():
         if line.startswith("FOUND:"):
-            # Extract the flagged value — strip quotes and whitespace
             value = line[len("FOUND:"):].strip().strip('"').strip("'").strip()
+            if not value:
+                continue
             if _PLACEHOLDER_RE.match(value):
                 continue
+            if _is_safe_software(value):
+                continue
+            # Dedup repeated findings
+            if value.lower() in seen_findings:
+                continue
+            seen_findings.add(value.lower())
         lines.append(line)
     filtered = "\n".join(lines).strip()
-    # If all FOUND: lines were placeholders, treat as clean
     if not any(l.startswith("FOUND:") for l in lines):
         return "CLEAN"
     return filtered
