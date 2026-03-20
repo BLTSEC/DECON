@@ -598,18 +598,18 @@ class TestIPv4EdgeCases:
         result = _engine().redact("10.10.14.5,10.10.14.10")
         _assert_clean(result, "10.10.14.5", "10.10.14.10")
 
-    def test_loopback_redacted(self):
-        """127.0.0.1 is a valid IP and should be redacted."""
+    def test_loopback_passthrough(self):
+        """127.0.0.1 is never sensitive — should pass through."""
         result = _engine().redact("listening on 127.0.0.1:8080")
-        _assert_clean(result, "127.0.0.1")
+        assert "127.0.0.1" in result
 
-    def test_broadcast_redacted(self):
+    def test_broadcast_passthrough(self):
         result = _engine().redact("brd 255.255.255.255")
-        _assert_clean(result, "255.255.255.255")
+        assert "255.255.255.255" in result
 
-    def test_zero_address(self):
+    def test_zero_address_passthrough(self):
         result = _engine().redact("bind 0.0.0.0:80")
-        _assert_clean(result, "0.0.0.0")
+        assert "0.0.0.0" in result
 
     def test_version_string_not_matched(self):
         """Version-like strings should not match IP if octets exceed 255."""
