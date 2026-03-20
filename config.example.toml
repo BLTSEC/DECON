@@ -1,0 +1,29 @@
+default_profile = "standard"
+
+[rules]
+# Toggle built-in rules on/off globally
+# ipv4 = true
+# email = true
+# mac = false
+
+[llm]
+enabled = false
+model = "qwen3.5:9b"
+host = "http://localhost:11434"
+
+[custom]
+values = ["ACME Corp", "Project Nighthawk"]          # case-sensitive
+values_nocase = ["jsmith", "proddb"]                  # case-insensitive
+
+[[custom.patterns]]
+name = "internal_domains"
+pattern = '[a-z0-9-]+\.corp\.acme\.com'
+replacement = "HOST_{n:02d}.example.internal"
+
+[profiles.client-share]
+hostname_internal = true
+# custom_values_extra = ["Nighthawk"]
+
+[profiles.internal]
+ipv4 = false
+mac = false
