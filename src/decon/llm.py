@@ -33,8 +33,11 @@ The text below has been redacted. Placeholders like 10.0.0.X, fd00::X, \
 user_XX@example.com, HOST_XX.example.internal, SECRET_XX, URL_REDACTED_XX, \
 etc. are SAFE — ignore them.
 
-Find only MISSED sensitive data: real IPs, emails, hostnames, credentials, \
-person/company/project names, usernames, real URLs.
+Look carefully for MISSED sensitive data that was NOT redacted:
+- Real hostnames and domain names (e.g. server.company.com, scanme.nmap.org)
+- Real IPs, emails, credentials, API keys
+- Person names, company names, project codenames, usernames
+- Real URLs (not URL_REDACTED placeholders)
 
 Reply CLEAN if nothing found. Otherwise one FOUND: per line. No explanation.
 
