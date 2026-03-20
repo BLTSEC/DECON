@@ -198,21 +198,6 @@ FOUND: "jdoe" on line 23 may be a real username
 
 Output still goes to stdout as normal. Add flagged values to your `[custom]` config and re-run if needed.
 
-### Using Qwen with Claude Code
-
-Ollama v0.14.0+ natively supports the Anthropic Messages API, which means Claude Code can use your local Qwen model directly:
-
-```bash
-export ANTHROPIC_BASE_URL=http://localhost:11434/v1
-export ANTHROPIC_AUTH_TOKEN=ollama
-export ANTHROPIC_MODEL=qwen3.5:9b
-claude
-```
-
-Why would you want this? If you're working with sensitive engagement data and can't send it to Anthropic's cloud API — client policy, air-gapped network, or just OpSec discipline — you can run Claude Code's full agentic workflow against a local model instead. No tokens leave your machine. You lose Claude's reasoning quality but keep the tooling: file editing, shell access, code search, the whole CLI experience backed by a model running on your own hardware.
-
-The tradeoff is real — local models aren't Claude — but for tasks like reviewing sanitized output, writing up findings, or triaging logs, it's a practical option when the alternative is not using an LLM at all.
-
 ### Example
 
 Regex handles the bulk — IPs, emails, MACs, keys all get consistent placeholders:
