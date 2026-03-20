@@ -182,6 +182,33 @@ model = "qwen3.5:9b"
 host = "http://localhost:11434"
 ```
 
+### Using from Exegol / Docker
+
+If you run DECON inside an [Exegol](https://exegol.readthedocs.io) container (or any Docker container), the `--llm` flag needs to reach Ollama on the host.
+
+**Host side — bind Ollama to the Docker bridge:**
+
+Add to your macOS `~/.zshrc` (or equivalent shell profile):
+
+```bash
+# Bind Ollama to Docker bridge so containers can reach it
+export OLLAMA_HOST="$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || echo '172.17.0.1')"
+```
+
+Restart your terminal and relaunch Ollama from the terminal (the GUI app won't pick up shell exports). This binds Ollama to the Docker bridge IP only — not your entire LAN like `0.0.0.0` would.
+
+**Container side — point DECON at the host:**
+
+Docker containers can reach the host via `host.docker.internal` (resolved via DNS on OrbStack, or `/etc/hosts` on Docker Desktop). Set this in your container's `~/.config/decon/decon.toml`:
+
+```toml
+[llm]
+enabled = true
+host = "http://host.docker.internal:11434"
+```
+
+Then `decon --llm` works from inside the container the same as on the host.
+
 ### Using the LLM Pass
 
 ```bash
