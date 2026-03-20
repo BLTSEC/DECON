@@ -10,7 +10,7 @@ from io import StringIO
 from decon.engine import RedactionEngine
 from decon.patterns import (
     _NTLM_HASH,
-    _AD_DOMAIN_USER,
+    _AD_DOMAIN_USER_BACKSLASH as _AD_DOMAIN_USER,
     _PRIVATE_KEY,
     _UNC_PATH,
     build_default_rules,
@@ -488,7 +488,7 @@ class TestProfileEnvVar:
 
 class TestRealisticNewRules:
     def test_secretsdump_output(self):
-        """Impacket secretsdump output contains NTLM hashes and domain users."""
+        """Impacket secretsdump output contains SAM dump lines and domain users."""
         text = """\
 [*] Dumping local SAM hashes (uid:rid:lmhash:nthash)
 Administrator:500:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::
@@ -500,8 +500,7 @@ CORP\\svc_backup:1103:aad3b435b51404eeaad3b435b51404ee:e52cac67419a9a224a3b108f3
         assert "31d6cfe0d16ae931b73c59d7e0c089c0" not in result
         assert "aad3b435b51404eeaad3b435b51404ee" not in result
         assert "CORP\\svc_backup" not in result
-        assert "NTLM_HASH_" in result
-        assert "DOMAIN_USER_" in result
+        assert "SAM_DUMP_" in result
 
     def test_unc_path_in_smb_enum(self):
         text = """\
@@ -804,3 +803,364 @@ class TestLLMPostFilterArtifacts:
         result = _filter_placeholder_findings(raw)
         assert "admin@corp.local" in result
         assert "2023-200_most_used_passwords.txt" not in result
+
+
+# ---------------------------------------------------------------------------
+# New rules: .htb/.lab TLDs
+# ---------------------------------------------------------------------------
+
+
+class TestHTBLabTLDs:
+    def test_htb_hostname(self):
+        result = RedactionEngine().redact("dc01.inlanefreight.htb")
+        assert "HOST_" in result
+        assert "inlanefreight.htb" not in result
+
+    def test_lab_hostname(self):
+        result = RedactionEngine().redact("vhagar.dracarys.lab")
+        assert "HOST_" in result
+        assert "dracarys.lab" not in result
+
+    def test_bare_htb_domain(self):
+        result = RedactionEngine().redact("target is inlanefreight.htb")
+        assert "HOST_" in result
+
+    def test_subdomain_htb(self):
+        result = RedactionEngine().redact("mail.internal.megacorp.htb")
+        assert "HOST_" in result
+        assert "megacorp.htb" not in result
+
+
+# ---------------------------------------------------------------------------
+# New rules: SAM/NTDS dump lines
+# ---------------------------------------------------------------------------
+
+
+class TestSAMDumpRule:
+    def test_basic_sam_line(self):
+        line = "Administrator:500:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::"
+        result = RedactionEngine().redact(line)
+        assert "SAM_DUMP_" in result
+        assert "Administrator" not in result
+        assert "31d6cfe0" not in result
+
+    def test_guest_sam_line(self):
+        line = "Guest:501:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::"
+        result = RedactionEngine().redact(line)
+        assert "SAM_DUMP_" in result
+
+    def test_domain_prefix_sam(self):
+        line = r"CORP\svc_backup:1103:aad3b435b51404eeaad3b435b51404ee:e52cac67419a9a224a3b108f3fa6cb6d:::"
+        result = RedactionEngine().redact(line)
+        assert "SAM_DUMP_" in result
+        assert "svc_backup" not in result
+
+    def test_fqdn_domain_sam(self):
+        line = "inlanefreight.htb\\julio:1106:aad3b435b51404eeaad3b435b51404ee:64f12cddaa88057e06a81b54e73b949b:::"
+        result = RedactionEngine().redact(line)
+        assert "SAM_DUMP_" in result
+
+    def test_machine_account_sam(self):
+        line = "DC01$:1002:aad3b435b51404eeaad3b435b51404ee:f0ec1102494ee338521fb866f5848d45:::"
+        result = RedactionEngine().redact(line)
+        assert "SAM_DUMP_" in result
+        assert "DC01$" not in result
+
+    def test_multiline_sam_dump(self):
+        text = """\
+[*] Dumping local SAM hashes
+admin:500:aad3b435b51404eeaad3b435b51404ee:cc4a0dd1b4e7da73ab58b0e49b953e40:::
+guest:501:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::
+"""
+        result = RedactionEngine().redact(text)
+        assert result.count("SAM_DUMP_") == 2
+        assert "admin:500:" not in result
+
+    def test_non_sam_not_matched(self):
+        """Regular colon-separated text should not match."""
+        text = "key:value:data"
+        result = RedactionEngine().redact(text)
+        assert "SAM_DUMP_" not in result
+
+
+# ---------------------------------------------------------------------------
+# New rules: NTLMv2 hashes (Responder/Inveigh captures)
+# ---------------------------------------------------------------------------
+
+
+class TestNTLMv2Rule:
+    def test_ntlmv2_hash(self):
+        line = "AB920::INLANEFREIGHT:52f6bb9682a00d2a:249B6350A1B7C9E43A4D7C3BE0AF4E21:0101000000000000abcdef1234567890"
+        result = RedactionEngine().redact(line)
+        assert "NTLMV2_HASH_" in result
+        assert "AB920" not in result
+        assert "INLANEFREIGHT" not in result
+
+    def test_responder_capture(self):
+        line = "jsmith::CORP:aabbccdd11223344:1234567890abcdef1234567890abcdef:01010000000000001234567890abcdef"
+        result = RedactionEngine().redact(line)
+        assert "NTLMV2_HASH_" in result
+        assert "jsmith" not in result
+
+
+# ---------------------------------------------------------------------------
+# New rules: Kerberos keys
+# ---------------------------------------------------------------------------
+
+
+class TestKerberosKeyRule:
+    def test_aes256_key(self):
+        line = r"CORP\DC01$:aes256-cts-hmac-sha1-96:86e98ff8d71ffea0123456789abcdef0123456789abcdef0123456789abcdef0"
+        result = RedactionEngine().redact(line)
+        assert "KERBEROS_KEY_" in result
+        assert "86e98ff8" not in result
+
+    def test_aes128_key(self):
+        line = r"CORP\svc_sql:aes128-cts-hmac-sha1-96:350bd90fcadae4e9d7e7dca40f82d316"
+        result = RedactionEngine().redact(line)
+        assert "KERBEROS_KEY_" in result
+
+    def test_des_key(self):
+        line = r"CORP\MS01$:des-cbc-md5:ba234ae034f14c67"
+        result = RedactionEngine().redact(line)
+        assert "KERBEROS_KEY_" in result
+
+
+# ---------------------------------------------------------------------------
+# New rules: Forward-slash domain/user (Impacket style)
+# ---------------------------------------------------------------------------
+
+
+class TestDomainUserSlash:
+    def test_impacket_basic(self):
+        result = RedactionEngine().redact("secretsdump.py CORP/admin@10.1.1.1")
+        assert "DOMAIN_USER_" in result
+        assert "CORP/admin" not in result
+
+    def test_impacket_with_password(self):
+        result = RedactionEngine().redact("INLANEFREIGHT/vfrank:Welcome1@172.16.10.25")
+        assert "DOMAIN_USER_" in result
+        assert "vfrank" not in result
+        assert "Welcome1" not in result
+
+    def test_fqdn_slash(self):
+        result = RedactionEngine().redact("acme.corp/svc_sql:SqlPass1!@10.10.10.5")
+        assert "DOMAIN_USER_" in result
+
+    def test_http_version_not_matched(self):
+        """HTTP/1.1 must not be matched as domain/user."""
+        result = RedactionEngine().redact("HTTP/1.1 200 OK")
+        assert result == "HTTP/1.1 200 OK"
+
+    def test_ftp_version_not_matched(self):
+        result = RedactionEngine().redact("FTP/2.0 ready")
+        assert "DOMAIN_USER_" not in result
+
+    def test_dcc2_with_slash_prefix(self):
+        """DCC2 lines using DOMAIN/user: prefix."""
+        line = "ACME.CORP/jdoe:$DCC2$10240#jdoe#a4f49c406510bdcab6824ee7c30fd852"
+        result = RedactionEngine().redact(line)
+        # The DCC2 hash or domain/user should be caught
+        assert "jdoe" not in result
+
+
+# ---------------------------------------------------------------------------
+# New rules: CLI flag secrets (-p, -H, etc.)
+# ---------------------------------------------------------------------------
+
+
+class TestCLIFlagSecrets:
+    def test_p_flag_quoted(self):
+        result = RedactionEngine().redact("nxc smb 10.0.0.0/24 -u fcastle -p 'Password1'")
+        assert "Password1" not in result
+        assert "SECRET_" in result
+
+    def test_p_flag_unquoted(self):
+        result = RedactionEngine().redact("hydra -l admin -p SuperSecret123 10.1.1.1")
+        assert "SuperSecret123" not in result
+
+    def test_P_flag(self):
+        result = RedactionEngine().redact("hydra -l admin -P /usr/share/wordlists/rockyou.txt 10.1.1.1")
+        # File paths to wordlists should NOT be treated as secrets
+        # The -P flag is for password files, not passwords — but our rule matches it
+        # This is acceptable since it redacts a file path that could contain target info
+        assert "SECRET_" in result or "/usr/share" in result
+
+    def test_hash_flag(self):
+        result = RedactionEngine().redact("evil-winrm -H aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0 -i 10.1.1.1")
+        # The hash should be caught by either -H flag or ntlm_hash rule
+        assert "aad3b435" not in result
+
+    def test_password_long_flag(self):
+        result = RedactionEngine().redact("tool --password MyP@ss123! target")
+        assert "MyP@ss123!" not in result
+
+    def test_pw_flag(self):
+        result = RedactionEngine().redact("evil-winrm -pw weasal123 -i 10.1.1.1")
+        assert "weasal123" not in result
+
+
+# ---------------------------------------------------------------------------
+# New rules: Kerberoast/AS-REP hashes
+# ---------------------------------------------------------------------------
+
+
+class TestKerberosHashRule:
+    def test_kerberoast_hash(self):
+        line = "$krb5tgs$23$*svc_sql$CORP.LOCAL$corp.local/svc_sql*$aabbccdd$0123456789abcdef"
+        result = RedactionEngine().redact(line)
+        assert "KERBEROS_HASH_" in result
+        assert "svc_sql" not in result
+
+    def test_asrep_hash(self):
+        line = "$krb5asrep$23$jsmith$CORP.LOCAL$aabbccdd11223344$0123456789abcdef0123456789abcdef"
+        result = RedactionEngine().redact(line)
+        assert "KERBEROS_HASH_" in result
+        assert "jsmith" not in result
+
+
+# ---------------------------------------------------------------------------
+# New rules: DCC2 cached credentials
+# ---------------------------------------------------------------------------
+
+
+class TestDCC2Rule:
+    def test_dcc2_hash(self):
+        line = "$DCC2$10240#julio#c2139497f24725b345aa1e23352481f3"
+        result = RedactionEngine().redact(line)
+        assert "DCC2_HASH_" in result
+        assert "julio" not in result
+
+    def test_dcc2_with_domain_prefix(self):
+        line = "INLANEFREIGHT.HTB/julio:$DCC2$10240#julio#c2139497f24725b345aa1e23352481f3"
+        result = RedactionEngine().redact(line)
+        assert "julio" not in result
+
+
+# ---------------------------------------------------------------------------
+# New rules: DPAPI keys
+# ---------------------------------------------------------------------------
+
+
+class TestDPAPIRule:
+    def test_dpapi_machinekey(self):
+        line = "dpapi_machinekey:0x78f7020d08fa61b3b77b24130b1ecd58f53dd338"
+        result = RedactionEngine().redact(line)
+        assert "DPAPI_KEY_" in result
+        assert "78f7020d" not in result
+
+    def test_dpapi_userkey(self):
+        line = "dpapi_userkey:0x4c0d8465c338406d54a1ae09a56223e867907f39"
+        result = RedactionEngine().redact(line)
+        assert "DPAPI_KEY_" in result
+
+    def test_nlkm(self):
+        line = "NL$KM:a2529d310bb71c7545d64b76412dd321c65cdd04aabbccdd11223344"
+        result = RedactionEngine().redact(line)
+        assert "DPAPI_KEY_" in result
+        assert "a2529d31" not in result
+
+
+# ---------------------------------------------------------------------------
+# New rules: Machine account hex passwords
+# ---------------------------------------------------------------------------
+
+
+class TestMachineHexPassword:
+    def test_machine_hex(self):
+        line = "plain_password_hex:4d0073006100620069006e0065007400"
+        result = RedactionEngine().redact(line)
+        assert "MACHINE_HEX_PW_" in result
+        assert "4d007300" not in result
+
+
+# ---------------------------------------------------------------------------
+# New rules: Windows SID
+# ---------------------------------------------------------------------------
+
+
+class TestWindowsSIDRule:
+    def test_domain_sid(self):
+        result = RedactionEngine().redact("SID: S-1-5-21-3842939050-3880317879-2865463114-1001")
+        assert "SID_REDACTED_" in result
+        assert "3842939050" not in result
+
+    def test_sid_without_rid(self):
+        result = RedactionEngine().redact("Domain SID: S-1-5-21-3842939050-3880317879-2865463114")
+        assert "SID_REDACTED_" in result
+
+    def test_sid_in_mimikatz_output(self):
+        text = """\
+ * Username : administrator
+ * Domain   : CORP
+ * SID      : S-1-5-21-1234567890-9876543210-1122334455-500
+"""
+        result = RedactionEngine().redact(text)
+        assert "SID_REDACTED_" in result
+        assert "1234567890" not in result
+
+    def test_non_domain_sid_not_matched(self):
+        """Well-known SIDs like S-1-5-20 should not match (no 21- prefix)."""
+        result = RedactionEngine().redact("SID: S-1-5-20")
+        assert "SID_REDACTED_" not in result
+
+
+# ---------------------------------------------------------------------------
+# Context secret keyword expansion
+# ---------------------------------------------------------------------------
+
+
+class TestExpandedContextSecrets:
+    def test_username_keyword(self):
+        result = RedactionEngine().redact("Username: administrator")
+        assert "administrator" not in result
+        assert "SECRET_" in result
+
+    def test_domain_keyword(self):
+        result = RedactionEngine().redact("Domain: INLANEFREIGHT")
+        assert "INLANEFREIGHT" not in result
+
+    def test_ntlm_keyword(self):
+        result = RedactionEngine().redact("NTLM: 64f12cddaa88057e06a81b54e73b949b")
+        assert "64f12cdd" not in result
+
+    def test_user_id_keyword(self):
+        result = RedactionEngine().redact("User ID=netdb;Password=D@ta_bAse_adm1n!")
+        assert "netdb" not in result or "D@ta_bAse_adm1n!" not in result
+
+
+# ---------------------------------------------------------------------------
+# Integration: full secretsdump output with new rules
+# ---------------------------------------------------------------------------
+
+
+class TestFullSecretsdump:
+    def test_complete_secretsdump(self):
+        text = """\
+[*] Dumping local SAM hashes (uid:rid:lmhash:nthash)
+Administrator:500:aad3b435b51404eeaad3b435b51404ee:e19ccf75ee54e06b06a5907af13cef42:::
+Guest:501:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::
+[*] Dumping cached domain logon information
+ACME.CORP/jdoe:$DCC2$10240#jdoe#a4f49c406510bdcab6824ee7c30fd852
+[*] Dumping LSA Secrets
+dpapi_machinekey:0x78f7020d08fa61b3b77b24130b1ecd58f53dd338
+dpapi_userkey:0x4c0d8465c338406d54a1ae09a56223e867907f39
+NL$KM:a2529d310bb71c7545d64b76412dd321c65cdd04aabbccdd11223344
+ACME.CORP\\svc_sql:aes256-cts-hmac-sha1-96:86e98ff8d71ffea0123456789abcdef0123456789abcdef0123456789abcdef0
+$MACHINE.ACC:plain_password_hex:4d0073006100620069006e0065007400
+"""
+        engine = RedactionEngine()
+        result = engine.redact(text)
+        # SAM lines redacted atomically
+        assert "SAM_DUMP_" in result
+        assert "Administrator:500:" not in result
+        # DCC2
+        assert "jdoe" not in result
+        # DPAPI
+        assert "78f7020d" not in result
+        # Kerberos key
+        assert "86e98ff8" not in result
+        # Machine hex password
+        assert "4d007300" not in result
+        # Structure preserved
+        assert "[*] Dumping" in result

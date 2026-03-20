@@ -27,6 +27,14 @@ _PLACEHOLDER_RE = re.compile(
     r"|SSN_REDACTED_\d+"        # SSN placeholders
     r"|CC_REDACTED_\d+"         # credit card placeholders
     r"|NTLM_HASH_\d+"          # NTLM hash placeholders
+    r"|NTLMV2_HASH_\d+"        # NTLMv2 hash placeholders
+    r"|SAM_DUMP_\d+"            # SAM/NTDS dump placeholders
+    r"|KERBEROS_KEY_\d+"        # Kerberos key placeholders
+    r"|KERBEROS_HASH_\d+"       # Kerberoast/AS-REP placeholders
+    r"|DCC2_HASH_\d+"           # DCC2 cached credential placeholders
+    r"|DPAPI_KEY_\d+"           # DPAPI key placeholders
+    r"|MACHINE_HEX_PW_\d+"     # Machine hex password placeholders
+    r"|SID_REDACTED_\d+"        # Windows SID placeholders
     r"|DOMAIN_USER_\d+"         # AD domain\user placeholders
     r"|UNC_PATH_\d+"            # UNC path placeholders
     r"|PRIVATE_KEY_REDACTED_\d+"  # private key placeholders
@@ -39,7 +47,9 @@ _PLACEHOLDER_RE = re.compile(
 REVIEW_PROMPT = """\
 This is redacted pentest output. Placeholders (10.0.0.X, fd00::X, \
 user_XX@example.com, HOST_XX.example.internal, SECRET_XX, \
-URL_REDACTED_XX, NTLM_HASH_XX, DOMAIN_USER_XX, UNC_PATH_XX, \
+URL_REDACTED_XX, NTLM_HASH_XX, NTLMV2_HASH_XX, SAM_DUMP_XX, \
+KERBEROS_KEY_XX, KERBEROS_HASH_XX, DCC2_HASH_XX, DPAPI_KEY_XX, \
+SID_REDACTED_XX, DOMAIN_USER_XX, UNC_PATH_XX, \
 PRIVATE_KEY_REDACTED_XX, etc.) are SAFE — ignore them completely.
 
 Flag ANY real-world value that survived redaction. Every real domain, \

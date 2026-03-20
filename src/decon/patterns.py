@@ -214,17 +214,31 @@ _CONTEXT_SECRET = re.compile(
     r"(?i)"
     r"(?:api[_-]?key|api[_-]?secret|access[_-]?key|private[_-]?key|"
     r"secret[_-]?key|signing[_-]?key|client[_-]?secret|"
-    r"token|password|passwd|secret|auth|credential|bearer)"
+    r"token|password|passwd|secret|auth|credential|bearer|"
+    r"user\s*id|username|ntlm|domain)"
     r"(?:\s*[:=]\s*)"
     r"(['\"]?)([^\s'\"]{4,})\1"
 )
 
-# Internal hostnames (patterns like host.corp.example.com, *.internal, *.local)
+# CLI flag secrets: -p/-P/-pw 'password', -H 'hash', --password 'value'
+# Matches flags followed by a space and a value (quoted or unquoted)
+_CLI_FLAG_SECRET = re.compile(
+    r"(?:^|\s)"
+    r"(?:-p|-P|-pw|--password|--pw|-H|--hash|--hashes)"
+    r"\s+"
+    r"(['\"]?)([^\s'\"]{3,})\1"
+    r"(?=\s|$)"
+)
+
+# Internal hostnames (patterns like dc01.corp.local, dc01.corp.acme.com, *.htb, *.lab)
+# Matches any hostname containing an internal TLD segment, with optional labels
+# before and after the TLD (e.g., dc01.corp.acme.com, mail.inlanefreight.htb).
 _HOSTNAME_INTERNAL = re.compile(
     r"(?<![.\w])"
+    r"(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*"  # optional subdomains before TLD
     r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?"
-    r"\.(?:corp|internal|local|intra|priv|lan)"
-    r"(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*"
+    r"\.(?:corp|internal|local|intra|priv|lan|htb|lab)"
+    r"(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*"  # optional labels after TLD
     r"(?![.\w])"
 )
 
@@ -240,10 +254,29 @@ _NTLM_HASH = re.compile(
     r"(?<![0-9a-fA-F])[0-9a-fA-F]{32}:[0-9a-fA-F]{32}(?![0-9a-fA-F])"
 )
 
+# SAM/NTDS dump lines: user:RID:LMhash:NThash:::
+# Covers secretsdump output with optional domain prefix (domain\user or domain/user)
+_SAM_DUMP = re.compile(
+    r"^(?:[^\s:]+[\\\/])?[^\s:]+:\d+:[0-9a-fA-F]{32}:[0-9a-fA-F]{32}:::$",
+    re.MULTILINE,
+)
+
+# NTLMv2 / Net-NTLM hash (Responder/Inveigh captures)
+# Format: user::DOMAIN:challenge:NTLMv2response (challenge is 16 hex, response is long hex)
+_NTLMV2_HASH = re.compile(
+    r"[^\s:]+::[^\s:]*:[0-9a-fA-F]{16}:[0-9a-fA-F]{32}:[0-9a-fA-F]{20,}"
+)
+
+# Kerberos encryption keys from secretsdump LSA output
+# Format: domain\user:aes256-cts-hmac-sha1-96:hexkey
+_KERBEROS_KEY = re.compile(
+    r"[^\s:]+:(?:aes256-cts-hmac-sha1-96|aes128-cts-hmac-sha1-96|des-cbc-md5):[0-9a-fA-F]+"
+)
+
 # Active Directory domain\username with optional :password
-# Matches uppercase short domains (CORP\user) and FQDN domains (megacorp.local\user).
+# Backslash: CORP\user, megacorp.local\user (standard Windows notation)
 # Optional :password captures credentials in tool output (netexec, crackmapexec).
-_AD_DOMAIN_USER = re.compile(
+_AD_DOMAIN_USER_BACKSLASH = re.compile(
     r"(?<![\w\\])"
     r"(?:"
     r"[A-Z][A-Z0-9._-]{0,14}"                          # CORP, CONTOSO.LOCAL
@@ -252,6 +285,47 @@ _AD_DOMAIN_USER = re.compile(
     r"\\[a-zA-Z0-9._-]+"                                # \username
     r"(?::[^\s]{4,})?"                                   # optional :password
     r"(?![\w\\])"
+)
+
+# Impacket-style domain/username with optional :password@host
+# Forward-slash: DOMAIN/user:pass@host, DOMAIN/user@host
+# Username must start with alpha (avoids HTTP/1.1, FTP/2.0, etc.)
+_AD_DOMAIN_USER_SLASH = re.compile(
+    r"(?<![\w\/])"
+    r"(?:"
+    r"[A-Z][A-Z0-9._-]{0,14}"                           # CORP, CONTOSO.LOCAL
+    r"|[a-zA-Z0-9](?:[a-zA-Z0-9-]*\.)+[a-zA-Z]{2,}"     # megacorp.local (FQDN)
+    r")"
+    r"\/[a-zA-Z][a-zA-Z0-9._-]*"                         # /username (must start with alpha)
+    r"(?::[^\s@]{4,})?(?:@[^\s]+)?"                       # optional :password@host
+    r"(?![\w\/])"
+)
+
+# Kerberoast hash ($krb5tgs$) and AS-REP hash ($krb5asrep$)
+# These contain username and domain, plus the hash itself
+_KERBEROS_HASH = re.compile(
+    r"\$krb5(?:tgs|asrep)\$\d*\$[^\s:]+(?:\$[^\s]+)+"
+)
+
+# DCC2 / Domain Cached Credentials
+# Format: $DCC2$10240#username#hash  or  DOMAIN/user:$DCC2$...
+_DCC2_HASH = re.compile(
+    r"(?:[^\s:]*\$)?DCC2\$\d+#[^#]+#[0-9a-fA-F]{32}"
+)
+
+# DPAPI keys (dpapi_machinekey, dpapi_userkey, NL$KM)
+_DPAPI_KEY = re.compile(
+    r"(?:dpapi_machinekey|dpapi_userkey|NL\$KM)\s*:\s*(?:0x)?[0-9a-fA-F]{20,}"
+)
+
+# Machine account plaintext hex password
+_MACHINE_HEX_PASSWORD = re.compile(
+    r"plain_password_hex:[0-9a-fA-F]{32,}"
+)
+
+# Windows SID (S-1-5-21-...)
+_WINDOWS_SID = re.compile(
+    r"S-1-5-21-\d+-\d+-\d+(?:-\d+)?"
 )
 
 # UNC paths (\\server\share)
@@ -350,6 +424,55 @@ def build_default_rules() -> list[Rule]:
             placeholder_template="API_KEY_{n:02d}",
         ),
         Rule(
+            name="kerberos_hash",
+            category="kerberos_hash",
+            priority=7,
+            pattern=_KERBEROS_HASH,
+            placeholder_template="KERBEROS_HASH_{n:02d}",
+        ),
+        Rule(
+            name="sam_dump",
+            category="sam_dump",
+            priority=8,
+            pattern=_SAM_DUMP,
+            placeholder_template="SAM_DUMP_{n:02d}",
+        ),
+        Rule(
+            name="ntlmv2_hash",
+            category="ntlmv2_hash",
+            priority=9,
+            pattern=_NTLMV2_HASH,
+            placeholder_template="NTLMV2_HASH_{n:02d}",
+        ),
+        Rule(
+            name="kerberos_key",
+            category="kerberos_key",
+            priority=9,
+            pattern=_KERBEROS_KEY,
+            placeholder_template="KERBEROS_KEY_{n:02d}",
+        ),
+        Rule(
+            name="dcc2_hash",
+            category="dcc2_hash",
+            priority=11,
+            pattern=_DCC2_HASH,
+            placeholder_template="DCC2_HASH_{n:02d}",
+        ),
+        Rule(
+            name="dpapi_key",
+            category="dpapi_key",
+            priority=11,
+            pattern=_DPAPI_KEY,
+            placeholder_template="DPAPI_KEY_{n:02d}",
+        ),
+        Rule(
+            name="machine_hex_password",
+            category="machine_hex_password",
+            priority=11,
+            pattern=_MACHINE_HEX_PASSWORD,
+            placeholder_template="MACHINE_HEX_PW_{n:02d}",
+        ),
+        Rule(
             name="ntlm_hash",
             category="ntlm_hash",
             priority=12,
@@ -361,6 +484,13 @@ def build_default_rules() -> list[Rule]:
             category="secret",
             priority=15,
             pattern=_CONTEXT_SECRET,
+            placeholder_template="SECRET_{n:02d}",
+        ),
+        Rule(
+            name="cli_flag_secret",
+            category="secret",
+            priority=16,
+            pattern=_CLI_FLAG_SECRET,
             placeholder_template="SECRET_{n:02d}",
         ),
         Rule(
@@ -382,7 +512,14 @@ def build_default_rules() -> list[Rule]:
             name="ad_domain_user",
             category="ad_domain_user",
             priority=25,
-            pattern=_AD_DOMAIN_USER,
+            pattern=_AD_DOMAIN_USER_BACKSLASH,
+            placeholder_template="DOMAIN_USER_{n:02d}",
+        ),
+        Rule(
+            name="ad_domain_user_slash",
+            category="ad_domain_user",
+            priority=25,
+            pattern=_AD_DOMAIN_USER_SLASH,
             placeholder_template="DOMAIN_USER_{n:02d}",
         ),
         Rule(
@@ -413,6 +550,13 @@ def build_default_rules() -> list[Rule]:
             priority=34,
             pattern=_UNC_PATH,
             placeholder_template="UNC_PATH_{n:02d}",
+        ),
+        Rule(
+            name="windows_sid",
+            category="windows_sid",
+            priority=18,
+            pattern=_WINDOWS_SID,
+            placeholder_template="SID_REDACTED_{n:02d}",
         ),
         Rule(
             name="cidr",
@@ -454,7 +598,7 @@ def build_default_rules() -> list[Rule]:
 
     # Override apply for rules with special handlers
     for r in rules:
-        if r.name == "context_secret":
+        if r.name in ("context_secret", "cli_flag_secret"):
             r.apply = lambda text, mapping, counters, _r=r: _context_secret_apply(
                 _r, text, mapping, counters
             )
