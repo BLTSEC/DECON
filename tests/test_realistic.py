@@ -195,7 +195,9 @@ Ethernet adapter Ethernet0:
         result = _engine().redact(self.SECRETSDUMP)
         assert "[*]" in result
         assert "SAM hashes" in result
-        assert "Administrator:" in result
+        # SAM dump lines should be redacted atomically
+        assert "SAM_DUMP_" in result
+        assert "Administrator:500:" not in result
 
 
 class TestGobusterOutput:

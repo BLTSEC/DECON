@@ -74,36 +74,54 @@ Rules are applied in priority order to prevent partial matches (e.g., JWTs are m
 | Category | Example Input | Example Output | Priority |
 |----------|--------------|----------------|----------|
 | Private Key | `-----BEGIN RSA PRIVATE KEY-----...` | `PRIVATE_KEY_REDACTED_01` | 5 |
+| Kerberoast/AS-REP | `$krb5tgs$23$*svc_sql$CORP...` | `KERBEROS_HASH_01` | 7 |
+| SAM/NTDS Dump | `Admin:500:LMhash:NThash:::` | `SAM_DUMP_01` | 8 |
+| NTLMv2 Hash | `user::DOMAIN:challenge:response` | `NTLMV2_HASH_01` | 9 |
+| Kerberos Key | `CORP\DC01$:aes256-cts-...:hex` | `KERBEROS_KEY_01` | 9 |
 | JWT | `eyJhbGciOi...` | `JWT_REDACTED_01` | 10 |
 | AWS Key | `AKIAIOSFODNN7EXAMPLE` | `API_KEY_01` | 10 |
+| DCC2 Cache | `$DCC2$10240#user#hash` | `DCC2_HASH_01` | 11 |
+| DPAPI Key | `dpapi_machinekey:0xaabb...` | `DPAPI_KEY_01` | 11 |
+| Machine Hex PW | `plain_password_hex:4d00...` | `MACHINE_HEX_PW_01` | 11 |
 | NTLM Hash | `aad3b435...:31d6cfe0...` | `NTLM_HASH_01` | 12 |
 | Secrets | `api_key="sk_live_..."` | `api_key="SECRET_01"` | 15 |
+| CLI Flag Secrets | `-p 'Password1'` | `-p 'SECRET_01'` | 16 |
+| Windows SID | `S-1-5-21-384293...` | `SID_REDACTED_01` | 18 |
 | SSN | `123-45-6789` | `SSN_REDACTED_01` | 20 |
 | Credit Card | `4111111111111111` | `CC_REDACTED_01` | 20 |
 | AD Domain\User | `CORP\jsmith:P@ssw0rd` | `DOMAIN_USER_01` | 25 |
+| AD Domain/User | `CORP/admin:pass@host` | `DOMAIN_USER_01` | 25 |
 | URL | `https://target.com/api` | `URL_REDACTED_01` | 28 |
 | Email | `admin@corp.com` | `user_01@example.com` | 30 |
 | Phone | `(555) 123-4567` | `(555) 555-0001` | 30 |
 | UNC Path | `\\dc01\SYSVOL` | `UNC_PATH_01` | 34 |
 | CIDR | `10.0.0.0/16` | `10.0.0.1/16` | 39 |
 | IPv4 | `192.168.1.50` | `10.0.0.1` | 40 |
+| IPv6 | `fe80::1` | `fd00::1` | 40 |
+| MAC | `aa:bb:cc:dd:ee:ff` | `00:DE:AD:00:00:01` | 40 |
+| Hostname | `dc01.corp.local` | `HOST_01.example.internal` | 45 |
 
 Loopback and special addresses (`127.0.0.1`, `0.0.0.0`, `255.255.255.255`, `169.254.x.x`) pass through unredacted — they're never target infrastructure.
 
 URLs pointing to public code hosting and security reference sites (`github.com`, `gitlab.com`, `exploit-db.com`, `attack.mitre.org`, etc.) also pass through. Sensitive values within them (org names, repo names) are still caught by custom value rules.
-| IPv6 | `fe80::1` | `fd00::1` | 40 |
-| MAC | `aa:bb:cc:dd:ee:ff` | `00:DE:AD:00:00:01` | 40 |
-| Hostname | `db01.corp.local` | `HOST_01.example.internal` | 45 |
 
-Context-anchored secrets (priority 15) preserve the label and only redact the value — `password=Hunter2` becomes `password=SECRET_01`, so the LLM knows a password was there without seeing the actual credential.
+Context-anchored secrets (priority 15) preserve the label and only redact the value — `password=Hunter2` becomes `password=SECRET_01`, so the LLM knows a password was there without seeing the actual credential. CLI flag secrets (priority 16) catch `-p`, `-P`, `-H`, `--password`, `--hash` flags common in hydra, netexec, evil-winrm commands.
+
+SAM/NTDS dump lines are redacted atomically — the entire `user:RID:LMhash:NThash:::` line becomes a single placeholder, preventing username leaks from partial matching.
+
+NTLMv2 hashes match Responder/Inveigh capture format (`user::DOMAIN:challenge:response`), which is distinct from the LM:NT pair format.
+
+Kerberoast (`$krb5tgs$`) and AS-REP (`$krb5asrep$`) hashes, DCC2 cached credentials (`$DCC2$`), DPAPI keys, Kerberos encryption keys (AES256/AES128/DES), and machine account hex passwords are all matched from secretsdump/LSA output.
+
+AD domain\user patterns match both backslash (Windows) and forward-slash (Impacket) notation. Uppercase short domains (`CORP\jsmith`) and FQDN domains (`megacorp.local\svc_bes`). When credentials follow the username, the password is captured too.
+
+Internal hostnames match `.corp`, `.local`, `.internal`, `.intra`, `.priv`, `.lan`, `.htb`, and `.lab` TLDs — covering both real engagement and CTF/lab environments.
 
 CIDR notation preserves the original subnet mask — `10.0.0.0/16` becomes `10.0.0.1/16`, not `/24`.
 
 Credit card detection uses Luhn validation to avoid false positives on random digit sequences.
 
-NTLM hashes match the LM:NT format from tools like Impacket's `secretsdump.py`.
-
-AD domain\user patterns match both uppercase short domains (`CORP\jsmith`) and FQDN domains (`megacorp.local\svc_bes`). When credentials follow the username (`domain\user:password`), the password is captured too — common in netexec/crackmapexec output.
+Windows SIDs matching `S-1-5-21-...` identify specific domain users and machines. Well-known SIDs (like `S-1-5-20`) are not matched.
 
 Private key blocks match PEM format (`-----BEGIN * PRIVATE KEY-----` through `-----END * PRIVATE KEY-----`), covering RSA, EC, DSA, and OPENSSH key types.
 
