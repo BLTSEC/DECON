@@ -29,15 +29,14 @@ _PLACEHOLDER_RE = re.compile(
 
 
 REVIEW_PROMPT = """\
-The text below has been redacted. Placeholders like 10.0.0.X, fd00::X, \
-user_XX@example.com, HOST_XX.example.internal, SECRET_XX, URL_REDACTED_XX, \
-etc. are SAFE — ignore them.
+This is redacted pentest output. Placeholders (10.0.0.X, fd00::X, \
+user_XX@example.com, HOST_XX.example.internal, SECRET_XX, \
+URL_REDACTED_XX, etc.) are SAFE — ignore them completely.
 
-Look carefully for MISSED sensitive data that was NOT redacted:
-- Real hostnames and domain names (e.g. server.company.com, scanme.nmap.org)
-- Real IPs, emails, credentials, API keys
-- Person names, company names, project codenames, usernames
-- Real URLs (not URL_REDACTED placeholders)
+Flag ANY real-world value that survived redaction. Every real domain, \
+hostname, IP, URL, email, username, person/company/project name, or \
+credential is a leak — even well-known public ones like nmap.org or \
+scanme.nmap.org. If it is not a placeholder, it should have been redacted.
 
 Reply CLEAN if nothing found. Otherwise one FOUND: per line. No explanation.
 
