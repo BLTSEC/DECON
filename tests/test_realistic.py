@@ -534,7 +534,7 @@ class TestOverlappingRules:
         engine = _engine()
         result = engine.redact("http://192.168.1.50:8080/api/v1")
         _assert_clean(result, "192.168.1.50")
-        assert "https://example.com/URL_" in result
+        assert "URL_REDACTED_" in result
 
     def test_ip_in_url_with_path(self):
         """IP in a URL followed by path — URL rule captures the whole URL."""
@@ -542,7 +542,7 @@ class TestOverlappingRules:
         result = engine.redact("curl https://10.10.14.5/admin/config.json")
         _assert_clean(result, "10.10.14.5")
         assert "curl" in result
-        assert "https://example.com/URL_" in result
+        assert "URL_REDACTED_" in result
 
     def test_multiple_secrets_same_line(self):
         """Multiple context secrets on the same line."""
@@ -1176,7 +1176,7 @@ class TestURLRedaction:
     def test_https_with_path(self):
         result = _engine().redact("report at https://nmap.org/submit/ .")
         _assert_clean(result, "https://nmap.org/submit/")
-        assert "https://example.com/URL_" in result
+        assert "URL_REDACTED_" in result
 
     def test_http_with_ip_and_port(self):
         result = _engine().redact("GET http://10.0.0.1:8080/api")
@@ -1187,7 +1187,7 @@ class TestURLRedaction:
         engine.redact("visit https://nmap.org/submit/")
         engine.redact("again https://nmap.org/submit/")
         p = engine.mapping["https://nmap.org/submit/"]
-        assert p == "https://example.com/URL_01"
+        assert p == "URL_REDACTED_01"
 
     def test_url_placeholder_not_reredacted(self):
         engine = _engine()
@@ -1197,7 +1197,7 @@ class TestURLRedaction:
 
     def test_url_in_parens(self):
         result = _engine().redact("(https://example.com/path)")
-        assert "https://example.com/URL_" in result
+        assert "URL_REDACTED_" in result
 
     def test_http_not_protocol_version(self):
         """HTTP/1.1 should NOT be matched as a URL."""

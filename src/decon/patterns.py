@@ -291,7 +291,7 @@ def build_default_rules() -> list[Rule]:
             category="url",
             priority=35,
             pattern=_URL,
-            placeholder_template="https://example.com/URL_{n:02d}",
+            placeholder_template="URL_REDACTED_{n:02d}",
         ),
         Rule(
             name="cidr",

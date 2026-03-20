@@ -15,7 +15,7 @@ Redacted text below uses SAFE placeholders. Do NOT flag any of these patterns:
 - HOST_XX.example.internal (hostnames)
 - 00:DE:AD:00:00:XX (MACs)
 - SECRET_XX, API_KEY_XX, JWT_REDACTED_XX (secrets)
-- https://example.com/URL_XX (URLs)
+- URL_REDACTED_XX (URLs)
 - SSN_REDACTED_XX, CC_REDACTED_XX, (555) 555-XXXX (PII)
 
 Find only MISSED sensitive data: real IPs, emails, hostnames, credentials, \
