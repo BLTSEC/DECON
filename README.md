@@ -93,8 +93,17 @@ decon --enable ssn          # enable specific rules
 ## Config
 
 ```bash
-decon --init-config   # creates ~/.config/decon/decon.toml
+decon --init-config   # creates default config
 ```
+
+Config location:
+
+| OS | Path |
+|----|------|
+| Linux | `~/.config/decon/decon.toml` |
+| macOS | `~/.config/decon/decon.toml` |
+
+Same path on both — `--init-config` creates the directory if it doesn't exist. Works the same whether installed via `pipx`, `uv tool`, or a local venv.
 
 Config supports global rule toggles, profiles for different audiences, custom literal values, and custom regex patterns:
 
