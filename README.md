@@ -186,16 +186,38 @@ host = "http://localhost:11434"
 
 If you run DECON inside an [Exegol](https://exegol.readthedocs.io) container (or any Docker container), the `--llm` flag needs to reach Ollama on the host.
 
-**Host side — bind Ollama to the Docker bridge:**
+**Host side — bind Ollama to all interfaces:**
 
 Add to your macOS `~/.zshrc` (or equivalent shell profile):
 
 ```bash
-# Bind Ollama to Docker bridge so containers can reach it
-export OLLAMA_HOST="$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || echo '172.17.0.1')"
+export OLLAMA_HOST="0.0.0.0"
 ```
 
-Restart your terminal and relaunch Ollama from the terminal (the GUI app won't pick up shell exports). This binds Ollama to the Docker bridge IP only — not your entire LAN like `0.0.0.0` would.
+Restart your terminal and relaunch Ollama from the terminal (the GUI app won't pick up shell exports).
+
+**Lock down port 11434 with pf (recommended):**
+
+Binding to `0.0.0.0` exposes Ollama on all interfaces. Use macOS's built-in packet filter to restrict access to localhost and Docker/OrbStack subnets:
+
+```bash
+# Create the anchor file
+sudo tee /etc/pf.anchors/ollama <<'EOF'
+# Allow localhost and OrbStack/Docker subnets to reach Ollama
+pass in quick on lo0 proto tcp from any to any port 11434
+pass in quick proto tcp from 192.168.215.0/24 to any port 11434
+block in quick proto tcp from any to any port 11434
+EOF
+
+# Add the anchor to pf.conf (one-time setup)
+echo 'anchor "ollama"' | sudo tee -a /etc/pf.conf
+echo 'load anchor "ollama" from "/etc/pf.anchors/ollama"' | sudo tee -a /etc/pf.conf
+
+# Load the rules
+sudo pfctl -f /etc/pf.conf -e
+```
+
+This allows only your machine and containers to reach Ollama — external hosts on your LAN are blocked.
 
 **Container side — point DECON at the host:**
 

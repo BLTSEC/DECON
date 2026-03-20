@@ -530,19 +530,19 @@ class TestOverlappingRules:
         assert "password=" in result
 
     def test_ip_in_url_with_port(self):
-        """IP embedded in a URL with port — should still redact the IP."""
+        """IP embedded in a URL with port — URL rule captures the whole URL."""
         engine = _engine()
         result = engine.redact("http://192.168.1.50:8080/api/v1")
         _assert_clean(result, "192.168.1.50")
-        assert "8080" in result
-        assert "/api/v1" in result
+        assert "https://example.com/URL_" in result
 
     def test_ip_in_url_with_path(self):
-        """IP in a URL followed by path."""
+        """IP in a URL followed by path — URL rule captures the whole URL."""
         engine = _engine()
         result = engine.redact("curl https://10.10.14.5/admin/config.json")
         _assert_clean(result, "10.10.14.5")
-        assert "/admin/config.json" in result
+        assert "curl" in result
+        assert "https://example.com/URL_" in result
 
     def test_multiple_secrets_same_line(self):
         """Multiple context secrets on the same line."""
@@ -1117,3 +1117,99 @@ fe80::a00:27ff:fe8e:8aa8%eth0 link-local
         assert stats.get("credit_card", 0) >= 1
         assert stats.get("phone", 0) >= 1
         assert stats.get("cidr", 0) >= 1
+
+
+# =============================================================================
+# IPv6 compressed forms
+# =============================================================================
+
+class TestIPv6Compressed:
+    """IPv6 addresses with :: compression — these were previously missed."""
+
+    def test_prefix_suffix(self):
+        """2600:3c01::f03c:91ff:fe18:bb2f — the nmap scanme address."""
+        result = _engine().redact("addr 2600:3c01::f03c:91ff:fe18:bb2f")
+        _assert_clean(result, "2600:3c01::f03c:91ff:fe18:bb2f")
+        assert "fd00::" in result
+
+    def test_three_prefix_three_suffix(self):
+        result = _engine().redact("addr 2001:db8:85a3::8a2e:370:7334")
+        _assert_clean(result, "2001:db8:85a3::8a2e:370:7334")
+
+    def test_one_prefix_six_suffix(self):
+        result = _engine().redact("addr a::b:c:d:e:f:1")
+        _assert_clean(result, "a::b:c:d:e:f:1")
+
+    def test_loopback(self):
+        engine = _engine()
+        result = engine.redact("listening on ::1")
+        assert "::1" in engine.mapping
+        assert result == "listening on fd00::1"
+
+    def test_trailing_double_colon(self):
+        result = _engine().redact("prefix 2001:db8::")
+        _assert_clean(result, "2001:db8::")
+
+    def test_full_address(self):
+        result = _engine().redact("2001:0db8:85a3:0000:0000:8a2e:0370:7334")
+        _assert_clean(result, "2001:0db8:85a3:0000:0000:8a2e:0370:7334")
+
+    def test_link_local_with_zone(self):
+        result = _engine().redact("fe80::1%eth0")
+        _assert_clean(result, "fe80::1%eth0")
+
+    def test_consistency(self):
+        """Same IPv6 address gets same placeholder."""
+        engine = _engine()
+        engine.redact("first 2600:3c01::f03c:91ff:fe18:bb2f")
+        engine.redact("second 2600:3c01::f03c:91ff:fe18:bb2f")
+        assert "2600:3c01::f03c:91ff:fe18:bb2f" in engine.mapping
+
+
+# =============================================================================
+# URL redaction
+# =============================================================================
+
+class TestURLRedaction:
+    """URLs should be captured as whole units."""
+
+    def test_https_with_path(self):
+        result = _engine().redact("report at https://nmap.org/submit/ .")
+        _assert_clean(result, "https://nmap.org/submit/")
+        assert "https://example.com/URL_" in result
+
+    def test_http_with_ip_and_port(self):
+        result = _engine().redact("GET http://10.0.0.1:8080/api")
+        _assert_clean(result, "http://10.0.0.1:8080/api")
+
+    def test_url_consistency(self):
+        engine = _engine()
+        engine.redact("visit https://nmap.org/submit/")
+        engine.redact("again https://nmap.org/submit/")
+        p = engine.mapping["https://nmap.org/submit/"]
+        assert p == "https://example.com/URL_01"
+
+    def test_url_placeholder_not_reredacted(self):
+        engine = _engine()
+        r1 = engine.redact("see https://nmap.org/submit/")
+        r2 = engine.redact(r1)
+        assert r1 == r2
+
+    def test_url_in_parens(self):
+        result = _engine().redact("(https://example.com/path)")
+        assert "https://example.com/URL_" in result
+
+    def test_http_not_protocol_version(self):
+        """HTTP/1.1 should NOT be matched as a URL."""
+        result = _engine().redact("HTTP/1.1 200 OK")
+        assert result == "HTTP/1.1 200 OK"
+
+    def test_nmap_output_urls(self):
+        """Real nmap output with URLs — all should be redacted."""
+        text = (
+            "Service detection performed. Please report any incorrect results "
+            "at https://nmap.org/submit/ .\n"
+            "Starting Nmap 7.93 ( https://nmap.org ) at 2026-03-20"
+        )
+        result = _engine().redact(text)
+        _assert_clean(result, "https://nmap.org/submit/", "https://nmap.org")

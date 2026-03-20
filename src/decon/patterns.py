@@ -98,16 +98,21 @@ _CIDR = re.compile(
     r"(?![\d/])"
 )
 
-# IPv6 — common forms (full, compressed, mixed)
+# IPv6 — all standard forms (full, compressed, link-local with zone ID)
 _IPV6 = re.compile(
     r"(?<![:\w])"
     r"(?:"
-    r"(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}"  # full
-    r"|(?:[0-9a-fA-F]{1,4}:){1,7}:"  # trailing ::
-    r"|(?:[0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}"  # :: with one group after
-    r"|::(?:[0-9a-fA-F]{1,4}:){0,5}[0-9a-fA-F]{1,4}"  # leading ::
-    r"|::"  # just ::
-    r"|fe80:(?::[0-9a-fA-F]{1,4}){0,4}%[0-9a-zA-Z]+"  # link-local
+    r"fe80:(?::[0-9a-fA-F]{1,4}){0,4}%[0-9a-zA-Z]+"             # link-local w/ zone
+    r"|(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}"                # full (8 groups)
+    r"|(?:[0-9a-fA-F]{1,4}:){1,7}:"                              # trailing ::
+    r"|(?:[0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}"             # N:: + 1 suffix
+    r"|(?:[0-9a-fA-F]{1,4}:){1,5}(?::[0-9a-fA-F]{1,4}){2}"      # N:: + 2 suffix
+    r"|(?:[0-9a-fA-F]{1,4}:){1,4}(?::[0-9a-fA-F]{1,4}){3}"      # N:: + 3 suffix
+    r"|(?:[0-9a-fA-F]{1,4}:){1,3}(?::[0-9a-fA-F]{1,4}){4}"      # N:: + 4 suffix
+    r"|(?:[0-9a-fA-F]{1,4}:){1,2}(?::[0-9a-fA-F]{1,4}){5}"      # N:: + 5 suffix
+    r"|[0-9a-fA-F]{1,4}:(?::[0-9a-fA-F]{1,4}){6}"               # 1:: + 6 suffix
+    r"|::(?:[0-9a-fA-F]{1,4}:){0,6}[0-9a-fA-F]{1,4}"            # leading ::
+    r"|::"                                                         # just ::
     r")"
     r"(?![:\w])"
 )
@@ -163,6 +168,13 @@ _JWT = re.compile(
 # AWS access key (starts with AKIA, 20 chars)
 _AWS_KEY = re.compile(r"(?<![A-Z0-9])AKIA[0-9A-Z]{16}(?![A-Z0-9])")
 
+
+# URL (http:// and https://)
+_URL = re.compile(
+    r"https?://"
+    r"[^\s<>\"\x27\)\]]*"
+    r"[^\s<>\"\x27\)\].,;:!?\-]"
+)
 
 # Generic API key / token in key=value or key: value contexts
 _CONTEXT_SECRET = re.compile(
@@ -273,6 +285,13 @@ def build_default_rules() -> list[Rule]:
             priority=30,
             pattern=_PHONE,
             placeholder_template="(555) 555-{n:04d}",
+        ),
+        Rule(
+            name="url",
+            category="url",
+            priority=35,
+            pattern=_URL,
+            placeholder_template="https://example.com/URL_{n:02d}",
         ),
         Rule(
             name="cidr",
