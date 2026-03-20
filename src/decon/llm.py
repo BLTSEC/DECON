@@ -9,12 +9,17 @@ import urllib.error
 
 
 REVIEW_PROMPT = """\
-Redacted text below uses SAFE placeholders (10.0.0.X, user_XX@example.com, \
-HOST_XX.example.internal, 00:DE:AD:00:00:XX, SECRET_XX, API_KEY_XX, etc). \
-Do NOT flag these.
+Redacted text below uses SAFE placeholders. Do NOT flag any of these patterns:
+- 10.0.0.X (IPs), fd00::X (IPv6), 10.0.0.X/24 (CIDR)
+- user_XX@example.com (emails)
+- HOST_XX.example.internal (hostnames)
+- 00:DE:AD:00:00:XX (MACs)
+- SECRET_XX, API_KEY_XX, JWT_REDACTED_XX (secrets)
+- https://example.com/URL_XX (URLs)
+- SSN_REDACTED_XX, CC_REDACTED_XX, (555) 555-XXXX (PII)
 
 Find only MISSED sensitive data: real IPs, emails, hostnames, credentials, \
-person/company/project names, usernames, internal URLs.
+person/company/project names, usernames, real URLs.
 
 Reply CLEAN if nothing found. Otherwise one FOUND: per line. No explanation.
 
