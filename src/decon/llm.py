@@ -42,10 +42,14 @@ user_XX@example.com, HOST_XX.example.internal, SECRET_XX, \
 URL_REDACTED_XX, NTLM_HASH_XX, DOMAIN_USER_XX, UNC_PATH_XX, \
 PRIVATE_KEY_REDACTED_XX, etc.) are SAFE — ignore them completely.
 
-Flag ANY real-world value that survived redaction. Every real domain, \
-hostname, IP, URL, email, username, person/company/project name, or \
-credential is a leak — even well-known public ones like nmap.org or \
-scanme.nmap.org. If it is not a placeholder, it should have been redacted.
+Flag ANY real-world value that survived redaction. Real domains, \
+hostnames, IPs, URLs, emails, usernames, person names, company names, \
+or credentials are leaks — even well-known public ones like nmap.org \
+or scanme.nmap.org.
+
+Do NOT flag software names, version strings, or vendor names that appear \
+in service banners or tool output (e.g., Apache, OpenSSH, Ubuntu, Linux, \
+Nmap, NLnet Labs). These are findings, not target identifiers.
 
 Reply CLEAN if nothing found. Otherwise one FOUND: per line. No explanation.
 
