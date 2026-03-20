@@ -58,21 +58,35 @@ class TestADDomainUserPattern:
         m = _AD_DOMAIN_USER.search("CONTOSO.LOCAL\\administrator")
         assert m is not None
 
-    def test_no_match_lowercase_domain(self):
-        """Lowercase domains are skipped to avoid false positives on paths."""
+    def test_no_match_lowercase_short_domain(self):
+        """Lowercase short domains are skipped to avoid false positives on paths."""
         assert _AD_DOMAIN_USER.search("usr\\bin") is None
 
-    def test_no_match_single_char_domain(self):
-        """Single-char domains that look like drive letters are excluded by word boundary."""
-        # C:\Users should not match — the (?<![\w\\]) prevents matching after word chars
-        # and the domain pattern requires uppercase starting letter
-        result = _AD_DOMAIN_USER.search("C:\\Users")
-        # C is only 1 char, {0,14} allows 0 extra so C\Users could match
-        # But in practice this would be caught — let's verify
-        if result:
-            # If it matches, the engine would redact it; acceptable since C:\Users
-            # in pentest output likely refers to a real path worth noting
-            pass
+    def test_fqdn_lowercase_domain(self):
+        """FQDN domains (with dots) are matched even when lowercase."""
+        m = _AD_DOMAIN_USER.search("megacorp.local\\svc_bes")
+        assert m is not None
+        assert m.group() == "megacorp.local\\svc_bes"
+
+    def test_fqdn_with_password(self):
+        """domain\\user:password is captured as one unit."""
+        m = _AD_DOMAIN_USER.search("megacorp.local\\svc_bes:Sheffield19 (Pwn3d!)")
+        assert m is not None
+        assert m.group() == "megacorp.local\\svc_bes:Sheffield19"
+
+    def test_uppercase_with_password(self):
+        m = _AD_DOMAIN_USER.search("CORP\\admin:P@ssw0rd!")
+        assert m is not None
+        assert m.group() == "CORP\\admin:P@ssw0rd!"
+
+    def test_short_password_not_captured(self):
+        """Passwords shorter than 4 chars are not captured (avoids port numbers)."""
+        m = _AD_DOMAIN_USER.search("CORP\\admin:80")
+        assert m is not None
+        assert m.group() == "CORP\\admin"  # :80 not included
+
+    def test_no_match_unix_path(self):
+        assert _AD_DOMAIN_USER.search("usr\\local\\bin") is None
 
     def test_engine_redaction(self):
         engine = RedactionEngine()
@@ -87,6 +101,18 @@ class TestADDomainUserPattern:
         assert "CORP\\jsmith" not in result
         assert "DOMAIN_USER_01" in result
         assert "DOMAIN_USER_02" in result
+
+    def test_netexec_credential_format(self):
+        """Full netexec line: domain, user, and password all redacted."""
+        engine = RedactionEngine()
+        result = engine.redact(
+            "[+] megacorp.local\\svc_bes:Sheffield19 (Pwn3d!)"
+        )
+        assert "megacorp.local" not in result
+        assert "svc_bes" not in result
+        assert "Sheffield19" not in result
+        assert "DOMAIN_USER_01" in result
+        assert "(Pwn3d!)" in result  # tool marker preserved
 
 
 class TestPrivateKeyPattern:
