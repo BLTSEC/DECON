@@ -1164,3 +1164,214 @@ $MACHINE.ACC:plain_password_hex:4d0073006100620069006e0065007400
         assert "4d007300" not in result
         # Structure preserved
         assert "[*] Dumping" in result
+
+
+# ---------------------------------------------------------------------------
+# CLI flag secrets: -u, -l, /param:value, -U user%pass
+# ---------------------------------------------------------------------------
+
+
+class TestCLIFlagUsernames:
+    def test_u_flag(self):
+        result = RedactionEngine().redact("nxc smb 10.1.1.1 -u fcastle -p Password1")
+        assert "fcastle" not in result
+        assert "Password1" not in result
+        assert "SECRET_" in result
+
+    def test_l_flag(self):
+        result = RedactionEngine().redact("hydra -l admin -p secret123 10.1.1.1")
+        assert "admin" not in result
+        assert "secret123" not in result
+
+    def test_login_flag(self):
+        result = RedactionEngine().redact("tool --login jsmith --password Hunter2")
+        assert "jsmith" not in result
+        assert "Hunter2" not in result
+
+    def test_user_flag(self):
+        result = RedactionEngine().redact("evil-winrm --user admin -p Password1 -i 10.1.1.1")
+        assert "admin" not in result
+
+
+class TestSlashParamSecrets:
+    def test_user_param(self):
+        result = RedactionEngine().redact("rubeus.exe asktgt /user:svc_sql /domain:corp.local")
+        assert "svc_sql" not in result
+        assert "corp.local" not in result
+
+    def test_rc4_param(self):
+        result = RedactionEngine().redact("rubeus.exe /rc4:e52cac67419a9a224a3b108f3fa6cb6d")
+        assert "e52cac67" not in result
+        assert "SECRET_" in result
+
+    def test_ntlm_param(self):
+        result = RedactionEngine().redact("mimikatz /ntlm:aabbccdd11223344aabbccdd11223344")
+        assert "aabbccdd" not in result
+
+    def test_aes256_param(self):
+        result = RedactionEngine().redact("rubeus /aes256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+        assert "01234567" not in result
+
+    def test_password_param(self):
+        result = RedactionEngine().redact("tool /password:MyP@ssw0rd!")
+        assert "MyP@ssw0rd!" not in result
+
+    def test_non_matching_param_preserved(self):
+        result = RedactionEngine().redact("tool /output:results.txt")
+        assert "results.txt" in result
+
+
+class TestSMBUserPass:
+    def test_basic(self):
+        result = RedactionEngine().redact("smbclient //10.1.1.1/share -U admin%P@ssword1")
+        assert "admin" not in result or "SECRET_" in result
+        assert "P@ssword1" not in result
+
+    def test_domain_user(self):
+        result = RedactionEngine().redact("smbclient -U CORP/admin%Secret1 //10.1.1.1/share")
+        # DOMAIN/user part caught by domain_user_slash, password by smb_user_pass
+        assert "Secret1" not in result
+
+
+# ---------------------------------------------------------------------------
+# False positive fixes: NT AUTHORITY, registry paths
+# ---------------------------------------------------------------------------
+
+
+class TestDomainUserFalsePositives:
+    def test_nt_authority_system(self):
+        """NT AUTHORITY\\SYSTEM should NOT be redacted."""
+        result = RedactionEngine().redact("NT AUTHORITY\\SYSTEM")
+        assert "DOMAIN_USER_" not in result
+        assert "SYSTEM" in result
+
+    def test_authority_system(self):
+        """AUTHORITY\\SYSTEM (without NT prefix) should NOT be redacted."""
+        result = RedactionEngine().redact("running as AUTHORITY\\SYSTEM")
+        assert "DOMAIN_USER_" not in result
+
+    def test_nt_service(self):
+        result = RedactionEngine().redact("NT SERVICE\\TrustedInstaller")
+        assert "DOMAIN_USER_" not in result
+
+    def test_builtin_administrators(self):
+        result = RedactionEngine().redact("BUILTIN\\Administrators")
+        assert "DOMAIN_USER_" not in result
+
+    def test_hklm_registry(self):
+        result = RedactionEngine().redact("HKLM\\SAM\\Domains")
+        assert "DOMAIN_USER_" not in result
+        assert "HKLM" in result
+
+    def test_hkey_registry(self):
+        result = RedactionEngine().redact("HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft")
+        assert "DOMAIN_USER_" not in result
+
+    def test_microsoft_path(self):
+        result = RedactionEngine().redact("Microsoft.PowerShell.Core\\Registry::HKEY_LOCAL_MACHINE")
+        assert "DOMAIN_USER_" not in result
+
+    def test_software_path(self):
+        result = RedactionEngine().redact("SOFTWARE\\Microsoft\\Windows\\CurrentVersion")
+        assert "DOMAIN_USER_" not in result
+
+    def test_real_domain_user_still_caught(self):
+        """Real domain\\user should still be redacted."""
+        result = RedactionEngine().redact("CORP\\jsmith:P@ssw0rd!")
+        assert "DOMAIN_USER_" in result
+        assert "jsmith" not in result
+
+    def test_real_fqdn_domain_user_still_caught(self):
+        result = RedactionEngine().redact("megacorp.local\\svc_backup")
+        assert "DOMAIN_USER_" in result
+
+
+# ---------------------------------------------------------------------------
+# User path rules
+# ---------------------------------------------------------------------------
+
+
+class TestLinuxHomePath:
+    def test_basic_home(self):
+        result = RedactionEngine().redact("/home/julio/.ssh/id_rsa")
+        assert "julio" not in result
+        assert "SECRET_" in result
+        assert "/home/" in result
+        assert "/.ssh/id_rsa" in result
+
+    def test_home_in_tool_output(self):
+        result = RedactionEngine().redact("found: /home/bob/.bash_history")
+        assert "bob" not in result
+
+    def test_multiple_users(self):
+        text = "/home/alice/data\n/home/bob/data"
+        engine = RedactionEngine()
+        result = engine.redact(text)
+        assert "alice" not in result
+        assert "bob" not in result
+
+    def test_non_home_path_preserved(self):
+        result = RedactionEngine().redact("/var/log/syslog")
+        assert result == "/var/log/syslog"
+
+
+class TestWindowsUserPath:
+    def test_basic_path(self):
+        result = RedactionEngine().redact("C:\\Users\\htb-student\\Desktop\\flag.txt")
+        assert "htb-student" not in result
+        assert "SECRET_" in result
+
+    def test_administrator_path(self):
+        result = RedactionEngine().redact("C:\\Users\\Administrator\\Documents")
+        assert "Administrator" not in result
+
+    def test_non_user_path_preserved(self):
+        result = RedactionEngine().redact("C:\\Windows\\System32\\cmd.exe")
+        assert result == "C:\\Windows\\System32\\cmd.exe"
+
+
+# ---------------------------------------------------------------------------
+# Integration: realistic netexec/hydra command lines
+# ---------------------------------------------------------------------------
+
+
+class TestRealisticCommandLines:
+    def test_netexec_full_command(self):
+        text = "nxc smb 10.10.14.5 -u fcastle -p 'Password123!' -d MARVEL.local"
+        engine = RedactionEngine()
+        result = engine.redact(text)
+        assert "fcastle" not in result
+        assert "Password123!" not in result
+        assert "10.10.14.5" not in result
+        assert "MARVEL.local" not in result
+
+    def test_evil_winrm_command(self):
+        text = "evil-winrm -i 10.10.14.5 -u admin -p 'P@ssw0rd!'"
+        result = RedactionEngine().redact(text)
+        assert "admin" not in result
+        assert "P@ssw0rd!" not in result
+        assert "10.10.14.5" not in result
+
+    def test_impacket_secretsdump(self):
+        text = "secretsdump.py CORP/admin:cracked_pass@10.10.14.5"
+        result = RedactionEngine().redact(text)
+        assert "admin" not in result
+        assert "cracked_pass" not in result
+
+    def test_rubeus_command(self):
+        text = "rubeus.exe asktgt /user:svc_sql /rc4:e52cac67419a9a224a3b108f3fa6cb6d /domain:corp.local"
+        result = RedactionEngine().redact(text)
+        assert "svc_sql" not in result
+        assert "e52cac67" not in result
+        assert "corp.local" not in result
+
+    def test_hydra_command(self):
+        text = "hydra -l admin -p 'Summer2024!' 10.10.14.5 ssh"
+        result = RedactionEngine().redact(text)
+        assert "admin" not in result
+        assert "Summer2024!" not in result
+
+    def test_smbclient_command(self):
+        text = "smbclient //10.10.14.5/ADMIN$ -U admin%Secret123!"
+        result = RedactionEngine().redact(text)
+        assert "Secret123!" not in result
