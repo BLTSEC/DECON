@@ -221,12 +221,25 @@ _CONTEXT_SECRET = re.compile(
 )
 
 # CLI flag secrets: -p/-P/-pw 'password', -H 'hash', --password 'value'
-# Matches flags followed by a space and a value (quoted or unquoted)
+# Also -u/-l/--user/--login for usernames, -U user%pass for smbclient
 _CLI_FLAG_SECRET = re.compile(
     r"(?:^|\s)"
-    r"(?:-p|-P|-pw|--password|--pw|-H|--hash|--hashes)"
+    r"(?:-p|-P|-pw|--password|--pw|-H|--hash|--hashes"
+    r"|-u|-l|--user|--login|--username|-U)"
     r"\s+"
     r"(['\"]?)([^\s'\"]{3,})\1"
+    r"(?=\s|$)"
+)
+
+# Rubeus/Mimikatz /param:value style (e.g., /user:admin /rc4:hash /ntlm:hash)
+_SLASH_PARAM_SECRET = re.compile(
+    r"\/(?:user|rc4|ntlm|aes256|aes128|des|password|pass|credential|domain)"
+    r":([^\s\/]{3,})"
+)
+
+# smbclient -U user%password format
+_SMB_USER_PASS = re.compile(
+    r"(?:^|\s)-U\s+([^\s%]+)%([^\s]{3,})"
     r"(?=\s|$)"
 )
 
@@ -272,6 +285,50 @@ _NTLMV2_HASH = re.compile(
 _KERBEROS_KEY = re.compile(
     r"[^\s:]+:(?:aes256-cts-hmac-sha1-96|aes128-cts-hmac-sha1-96|des-cbc-md5):[0-9a-fA-F]+"
 )
+
+# Windows built-in identities and registry paths that look like DOMAIN\user
+# but aren't real credentials — skip these in the AD domain\user rule.
+_SKIP_DOMAIN_PREFIXES = frozenset({
+    "NT AUTHORITY", "NT SERVICE", "IIS APPPOOL", "BUILTIN",
+    "AUTHORITY", "SERVICE",      # matched without NT prefix
+    "NT-AUTORITÄT",  # German Windows
+    "AUTORITE NT",   # French Windows
+    "Font",          # Font\Name in CSS/config
+})
+
+# Registry and system path prefixes that contain backslashes
+_SKIP_DOMAIN_PATTERNS = (
+    "HKLM", "HKCU", "HKEY_", "Registry", "Microsoft",
+    "SOFTWARE", "SYSTEM", "Classes", "CurrentVersion",
+)
+
+
+# Well-known Windows user values that are not real credentials
+_SKIP_DOMAIN_USERS = frozenset({
+    "SYSTEM", "NETWORK SERVICE", "LOCAL SERVICE", "LOCALSERVICE",
+    "NETWORKSERVICE", "DefaultAccount", "WDAGUtilityAccount",
+    "IUSR", "DefaultAppPool",
+})
+
+
+def _valid_domain_user(value: str) -> bool:
+    """Skip Windows built-in identities and registry paths."""
+    # Split on first backslash
+    sep = value.find("\\")
+    if sep == -1:
+        return True
+    domain = value[:sep]
+    user = value[sep + 1:].split(":")[0]  # strip optional :password
+    # Skip built-in Windows identities (check both domain and user)
+    if domain.upper() in {s.upper() for s in _SKIP_DOMAIN_PREFIXES}:
+        return False
+    if user.upper() in {s.upper() for s in _SKIP_DOMAIN_USERS}:
+        return False
+    # Skip registry/system paths
+    if any(domain.upper().startswith(p.upper()) for p in _SKIP_DOMAIN_PATTERNS):
+        return False
+    return True
+
 
 # Active Directory domain\username with optional :password
 # Backslash: CORP\user, megacorp.local\user (standard Windows notation)
@@ -321,6 +378,18 @@ _DPAPI_KEY = re.compile(
 # Machine account plaintext hex password
 _MACHINE_HEX_PASSWORD = re.compile(
     r"plain_password_hex:[0-9a-fA-F]{32,}"
+)
+
+# Linux home directory paths — redact the username portion
+# Matches /home/username and /root (both expose Linux usernames)
+_LINUX_HOME_PATH = re.compile(
+    r"/(?:home/)([a-zA-Z0-9._-]+)"
+)
+
+# Windows user profile paths — redact the username portion
+_WINDOWS_USER_PATH = re.compile(
+    r"(?i)C:\\\\?Users\\\\?"
+    r"([a-zA-Z0-9._\s-]+?)(?=\\\\|\\|/|\s|$)"
 )
 
 # Windows SID (S-1-5-21-...)
@@ -395,6 +464,94 @@ def _cidr_apply(
         mapping[value] = placeholder
         placeholder_values.add(placeholder)
         return placeholder
+
+    return rule.pattern.sub(_replace, text)
+
+
+def _user_path_apply(
+    rule: Rule,
+    text: str,
+    mapping: dict[str, str],
+    counters: dict[str, int],
+) -> str:
+    """Special handler for user paths — redacts only the username portion."""
+    placeholder_values = set(mapping.values())
+
+    def _replace(match: re.Match[str]) -> str:
+        value = match.group(1)
+        if value in placeholder_values:
+            return match.group(0)
+        if value in mapping:
+            placeholder = mapping[value]
+        else:
+            cat = rule.category
+            n = counters.get(cat, 0) + 1
+            counters[cat] = n
+            placeholder = rule.placeholder_template.format(n=n)
+            mapping[value] = placeholder
+            placeholder_values.add(placeholder)
+        full = match.group(0)
+        start = full[: match.start(1) - match.start(0)]
+        end = full[match.end(1) - match.start(0):]
+        return start + placeholder + end
+
+    return rule.pattern.sub(_replace, text)
+
+
+def _slash_param_apply(
+    rule: Rule,
+    text: str,
+    mapping: dict[str, str],
+    counters: dict[str, int],
+) -> str:
+    """Special handler for /param:value — redacts only the value part."""
+    placeholder_values = set(mapping.values())
+
+    def _replace(match: re.Match[str]) -> str:
+        value = match.group(1)
+        if value in placeholder_values:
+            return match.group(0)
+        if value in mapping:
+            placeholder = mapping[value]
+        else:
+            cat = rule.category
+            n = counters.get(cat, 0) + 1
+            counters[cat] = n
+            placeholder = rule.placeholder_template.format(n=n)
+            mapping[value] = placeholder
+            placeholder_values.add(placeholder)
+        full = match.group(0)
+        start = full[: match.start(1) - match.start(0)]
+        return start + placeholder
+
+    return rule.pattern.sub(_replace, text)
+
+
+def _smb_user_pass_apply(
+    rule: Rule,
+    text: str,
+    mapping: dict[str, str],
+    counters: dict[str, int],
+) -> str:
+    """Special handler for -U user%password — redacts both user and password."""
+    placeholder_values = set(mapping.values())
+
+    def _replace(match: re.Match[str]) -> str:
+        user = match.group(1)
+        password = match.group(2)
+        for value in (user, password):
+            if value not in mapping and value not in placeholder_values:
+                cat = rule.category
+                n = counters.get(cat, 0) + 1
+                counters[cat] = n
+                placeholder = rule.placeholder_template.format(n=n)
+                mapping[value] = placeholder
+                placeholder_values.add(placeholder)
+        user_ph = mapping.get(user, user)
+        pass_ph = mapping.get(password, password)
+        # Reconstruct: preserve leading whitespace and -U
+        prefix = match.group(0)[: match.start(1) - match.start(0)]
+        return prefix + user_ph + "%" + pass_ph
 
     return rule.pattern.sub(_replace, text)
 
@@ -494,6 +651,20 @@ def build_default_rules() -> list[Rule]:
             placeholder_template="SECRET_{n:02d}",
         ),
         Rule(
+            name="slash_param_secret",
+            category="secret",
+            priority=16,
+            pattern=_SLASH_PARAM_SECRET,
+            placeholder_template="SECRET_{n:02d}",
+        ),
+        Rule(
+            name="smb_user_pass",
+            category="secret",
+            priority=16,
+            pattern=_SMB_USER_PASS,
+            placeholder_template="SECRET_{n:02d}",
+        ),
+        Rule(
             name="ssn",
             category="ssn",
             priority=20,
@@ -514,6 +685,7 @@ def build_default_rules() -> list[Rule]:
             priority=25,
             pattern=_AD_DOMAIN_USER_BACKSLASH,
             placeholder_template="DOMAIN_USER_{n:02d}",
+            validator=_valid_domain_user,
         ),
         Rule(
             name="ad_domain_user_slash",
@@ -559,6 +731,20 @@ def build_default_rules() -> list[Rule]:
             placeholder_template="SID_REDACTED_{n:02d}",
         ),
         Rule(
+            name="linux_home_path",
+            category="secret",
+            priority=36,
+            pattern=_LINUX_HOME_PATH,
+            placeholder_template="SECRET_{n:02d}",
+        ),
+        Rule(
+            name="windows_user_path",
+            category="secret",
+            priority=36,
+            pattern=_WINDOWS_USER_PATH,
+            placeholder_template="SECRET_{n:02d}",
+        ),
+        Rule(
             name="cidr",
             category="cidr",
             priority=39,
@@ -600,6 +786,18 @@ def build_default_rules() -> list[Rule]:
     for r in rules:
         if r.name in ("context_secret", "cli_flag_secret"):
             r.apply = lambda text, mapping, counters, _r=r: _context_secret_apply(
+                _r, text, mapping, counters
+            )
+        elif r.name in ("linux_home_path", "windows_user_path"):
+            r.apply = lambda text, mapping, counters, _r=r: _user_path_apply(
+                _r, text, mapping, counters
+            )
+        elif r.name == "slash_param_secret":
+            r.apply = lambda text, mapping, counters, _r=r: _slash_param_apply(
+                _r, text, mapping, counters
+            )
+        elif r.name == "smb_user_pass":
+            r.apply = lambda text, mapping, counters, _r=r: _smb_user_pass_apply(
                 _r, text, mapping, counters
             )
         elif r.name == "cidr":

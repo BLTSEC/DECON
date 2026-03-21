@@ -86,6 +86,8 @@ Rules are applied in priority order to prevent partial matches (e.g., JWTs are m
 | NTLM Hash | `aad3b435...:31d6cfe0...` | `NTLM_HASH_01` | 12 |
 | Secrets | `api_key="sk_live_..."` | `api_key="SECRET_01"` | 15 |
 | CLI Flag Secrets | `-p 'Password1'` | `-p 'SECRET_01'` | 16 |
+| Slash Param Secrets | `/user:admin /rc4:hash` | `/user:SECRET_01 /rc4:SECRET_02` | 16 |
+| SMB User%Pass | `-U admin%P@ss` | `-U SECRET_01` | 16 |
 | Windows SID | `S-1-5-21-384293...` | `SID_REDACTED_01` | 18 |
 | SSN | `123-45-6789` | `SSN_REDACTED_01` | 20 |
 | Credit Card | `4111111111111111` | `CC_REDACTED_01` | 20 |
@@ -95,6 +97,8 @@ Rules are applied in priority order to prevent partial matches (e.g., JWTs are m
 | Email | `admin@corp.com` | `user_01@example.com` | 30 |
 | Phone | `(555) 123-4567` | `(555) 555-0001` | 30 |
 | UNC Path | `\\dc01\SYSVOL` | `UNC_PATH_01` | 34 |
+| Linux Home Path | `/home/julio/.ssh/` | `/home/SECRET_01/.ssh/` | 36 |
+| Windows User Path | `C:\Users\admin\` | `C:\Users\SECRET_01\` | 36 |
 | CIDR | `10.0.0.0/16` | `10.0.0.1/16` | 39 |
 | IPv4 | `192.168.1.50` | `10.0.0.1` | 40 |
 | IPv6 | `fe80::1` | `fd00::1` | 40 |
@@ -105,7 +109,11 @@ Loopback and special addresses (`127.0.0.1`, `0.0.0.0`, `255.255.255.255`, `169.
 
 URLs pointing to public code hosting and security reference sites (`github.com`, `gitlab.com`, `exploit-db.com`, `attack.mitre.org`, etc.) also pass through. Sensitive values within them (org names, repo names) are still caught by custom value rules.
 
-Context-anchored secrets (priority 15) preserve the label and only redact the value — `password=Hunter2` becomes `password=SECRET_01`, so the LLM knows a password was there without seeing the actual credential. CLI flag secrets (priority 16) catch `-p`, `-P`, `-H`, `--password`, `--hash` flags common in hydra, netexec, evil-winrm commands.
+Context-anchored secrets (priority 15) preserve the label and only redact the value — `password=Hunter2` becomes `password=SECRET_01`, so the LLM knows a password was there without seeing the actual credential. CLI flag secrets (priority 16) catch `-p`, `-P`, `-H`, `--password`, `--hash`, `-u`, `-l`, `--user`, `--login` flags common in hydra, netexec, evil-winrm commands. Rubeus/Mimikatz `/param:value` style (`/user:`, `/rc4:`, `/ntlm:`, `/aes256:`, `/password:`, `/domain:`) and smbclient `-U user%password` format are also matched.
+
+AD domain\user patterns skip Windows built-in identities (`NT AUTHORITY\SYSTEM`, `BUILTIN\Administrators`, `NT SERVICE\...`) and registry paths (`HKLM\...`, `HKEY_...`, `SOFTWARE\...`, `Microsoft\...`) to avoid false positives.
+
+Linux home paths (`/home/username/`) and Windows user profile paths (`C:\Users\username\`) redact only the username portion, preserving the path structure.
 
 SAM/NTDS dump lines are redacted atomically — the entire `user:RID:LMhash:NThash:::` line becomes a single placeholder, preventing username leaks from partial matching.
 
