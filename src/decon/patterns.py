@@ -7,6 +7,11 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 
+# Type alias for custom apply functions.
+# Signature: (rule, text, mapping, counters) -> str
+ApplyFn = Callable[["Rule", str, dict[str, str], dict[str, int]], str]
+
+
 @dataclass
 class Rule:
     """A single redaction rule with regex pattern and placeholder template."""
@@ -18,6 +23,7 @@ class Rule:
     placeholder_template: str
     enabled: bool = True
     validator: Callable[[str], bool] | None = None
+    apply_fn: ApplyFn | None = None
 
     def apply(
         self,
@@ -26,8 +32,10 @@ class Rule:
         counters: dict[str, int],
     ) -> str:
         """Apply this rule to text, updating mapping and counters."""
-        # Build reverse lookup of existing placeholder values so we never
-        # re-redact a placeholder produced by an earlier rule.
+        if self.apply_fn:
+            return self.apply_fn(self, text, mapping, counters)
+
+        # Default: replace the entire match with a placeholder.
         placeholder_values = set(mapping.values())
 
         def _replace(match: re.Match[str]) -> str:
@@ -36,7 +44,6 @@ class Rule:
             if self.validator and not self.validator(value):
                 return value
 
-            # Skip values that are already placeholders from a prior rule
             if value in placeholder_values:
                 return value
 
@@ -55,369 +62,30 @@ class Rule:
         return self.pattern.sub(_replace, text)
 
 
-# IPs that are never sensitive — loopback, unspecified, link-local, documentation.
-_SKIP_IPV4 = frozenset({
-    "127.0.0.1", "0.0.0.0", "255.255.255.255",
-})
-
-# Prefixes that are never target IPs (loopback range, link-local, documentation)
-_SKIP_IPV4_PREFIXES = ("127.", "169.254.", "192.0.2.", "198.51.100.", "203.0.113.")
+# ---------------------------------------------------------------------------
+# Special apply handlers
+# ---------------------------------------------------------------------------
 
 
-def _valid_ipv4(value: str) -> bool:
-    """Check all octets are 0-255 and not a loopback/special address."""
-    parts = value.split(".")
-    if len(parts) != 4:
-        return False
-    if not all(0 <= int(p) <= 255 for p in parts):
-        return False
-    # Skip loopback and other non-sensitive addresses
-    if value in _SKIP_IPV4:
-        return False
-    if any(value.startswith(p) for p in _SKIP_IPV4_PREFIXES):
-        return False
-    return True
-
-
-def _luhn_check(value: str) -> bool:
-    """Luhn algorithm for credit card validation."""
-    digits = [int(d) for d in value if d.isdigit()]
-    if len(digits) < 13:
-        return False
-    checksum = 0
-    for i, d in enumerate(reversed(digits)):
-        if i % 2 == 1:
-            d *= 2
-            if d > 9:
-                d -= 9
-        checksum += d
-    return checksum % 10 == 0
-
-
-# --- Pattern constants ---
-
-# IPv4: 4 dotted decimal octets, not preceded by dot/digit, not followed by digit or dot+digit
-_IPV4 = re.compile(
-    r"(?<![.\d])"
-    r"(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}"
-    r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)"
-    r"(?![\d]|\.[\d])"
-)
-
-# CIDR notation (IPv4/mask)
-_CIDR = re.compile(
-    r"(?<![.\d])"
-    r"(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}"
-    r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)"
-    r"/(?:3[0-2]|[12]?\d)"
-    r"(?![\d/])"
-)
-
-# IPv6 — all standard forms (full, compressed, link-local with zone ID)
-# Note: bare :: (unspecified address) excluded to avoid false positives on
-# C++/Perl/Ruby scope resolution operators. ::1 and other :: with groups
-# are still matched.
-_IPV6 = re.compile(
-    r"(?<![:\w])"
-    r"(?:"
-    r"fe80:(?::[0-9a-fA-F]{1,4}){0,4}%[0-9a-zA-Z]+"             # link-local w/ zone
-    r"|(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}"                # full (8 groups)
-    r"|(?:[0-9a-fA-F]{1,4}:){1,7}:"                              # trailing ::
-    r"|(?:[0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}"             # N:: + 1 suffix
-    r"|(?:[0-9a-fA-F]{1,4}:){1,5}(?::[0-9a-fA-F]{1,4}){2}"      # N:: + 2 suffix
-    r"|(?:[0-9a-fA-F]{1,4}:){1,4}(?::[0-9a-fA-F]{1,4}){3}"      # N:: + 3 suffix
-    r"|(?:[0-9a-fA-F]{1,4}:){1,3}(?::[0-9a-fA-F]{1,4}){4}"      # N:: + 4 suffix
-    r"|(?:[0-9a-fA-F]{1,4}:){1,2}(?::[0-9a-fA-F]{1,4}){5}"      # N:: + 5 suffix
-    r"|[0-9a-fA-F]{1,4}:(?::[0-9a-fA-F]{1,4}){6}"               # 1:: + 6 suffix
-    r"|::(?:[0-9a-fA-F]{1,4}:){0,6}[0-9a-fA-F]{1,4}"            # leading :: (at least one group)
-    r")"
-    r"(?![:\w])"
-)
-
-# MAC address (colon, dash, or dot separated)
-_MAC = re.compile(
-    r"(?<![:\w])"
-    r"(?:"
-    r"[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}"
-    r"|[0-9a-fA-F]{2}(?:-[0-9a-fA-F]{2}){5}"
-    r"|[0-9a-fA-F]{4}\.[0-9a-fA-F]{4}\.[0-9a-fA-F]{4}"
-    r")"
-    r"(?![:\w])"
-)
-
-# Email
-_EMAIL = re.compile(
-    r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
-)
-
-# Phone numbers (US-style, requires formatting chars to avoid matching bare digit runs)
-_PHONE = re.compile(
-    r"(?<!\d)"
-    r"(?:"
-    r"\+?1[-.\s]"
-    r")?"
-    r"(?:"
-    r"\(\d{3}\)[-.\s]?\d{3}[-.\s]\d{4}"  # (555) 123-4567
-    r"|\d{3}[-.]\d{3}[-.]\d{4}"          # 555-123-4567 or 555.123.4567
-    r")"
-    r"(?!\d)"
-)
-
-# SSN
-_SSN = re.compile(
-    r"(?<!\d)"
-    r"\d{3}-\d{2}-\d{4}"
-    r"(?!\d)"
-)
-
-# Credit card (13-19 digits, optionally separated by spaces or dashes)
-_CC = re.compile(
-    r"(?<!\d)"
-    r"(?:\d[ -]?){12,18}\d"
-    r"(?!\d)"
-)
-
-# JWT (three base64url segments separated by dots)
-_JWT = re.compile(
-    r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"
-)
-
-# AWS access key (starts with AKIA, 20 chars)
-_AWS_KEY = re.compile(r"(?<![A-Z0-9])AKIA[0-9A-Z]{16}(?![A-Z0-9])")
-
-# URL (http:// and https://)
-_URL = re.compile(
-    r"https?://"
-    r"[^\s<>\"\x27\)\]]*"
-    r"[^\s<>\"\x27\)\].,;:!?\-]"
-)
-
-# Public code/tool hosting domains — URLs to these are references to public
-# resources (tools, wordlists, docs), not target infrastructure.  Sensitive
-# values inside them (org names, repo names) are caught by custom value rules.
-_PUBLIC_URL_DOMAINS = frozenset({
-    "github.com", "raw.githubusercontent.com", "gist.github.com",
-    "gitlab.com", "bitbucket.org",
-    "exploit-db.com", "cvedetails.com",
-    "attack.mitre.org",
-})
-
-
-def _valid_url(value: str) -> bool:
-    """Skip URLs pointing to well-known public tool/resource domains."""
-    # Extract domain from URL
-    stripped = value.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0].lower()
-    return stripped not in _PUBLIC_URL_DOMAINS
-
-# Generic API key / token in key=value or key: value contexts
-_CONTEXT_SECRET = re.compile(
-    r"(?i)"
-    r"(?:api[_-]?key|api[_-]?secret|access[_-]?key|private[_-]?key|"
-    r"secret[_-]?key|signing[_-]?key|client[_-]?secret|"
-    r"token|password|passwd|secret|auth|credential|bearer|"
-    r"user\s*id|username|ntlm|domain)"
-    r"(?:\s*[:=]\s*)"
-    r"(['\"]?)([^\s'\"]{4,})\1"
-)
-
-# CLI flag secrets: -p/-P/-pw 'password', -H 'hash', --password 'value'
-# Also -u/-l/--user/--login for usernames, -U user%pass for smbclient
-_CLI_FLAG_SECRET = re.compile(
-    r"(?:^|\s)"
-    r"(?:-p|-P|-pw|--password|--pw|-H|--hash|--hashes"
-    r"|-u|-l|--user|--login|--username|-U)"
-    r"\s+"
-    r"(['\"]?)([^\s'\"]{3,})\1"
-    r"(?=\s|$)"
-)
-
-# Rubeus/Mimikatz /param:value style (e.g., /user:admin /rc4:hash /ntlm:hash)
-_SLASH_PARAM_SECRET = re.compile(
-    r"\/(?:user|rc4|ntlm|aes256|aes128|des|password|pass|credential|domain)"
-    r":([^\s\/]{3,})"
-)
-
-# smbclient -U user%password format
-_SMB_USER_PASS = re.compile(
-    r"(?:^|\s)-U\s+([^\s%]+)%([^\s]{3,})"
-    r"(?=\s|$)"
-)
-
-# Internal hostnames (patterns like dc01.corp.local, dc01.corp.acme.com, *.htb, *.lab)
-# Matches any hostname containing an internal TLD segment, with optional labels
-# before and after the TLD (e.g., dc01.corp.acme.com, mail.inlanefreight.htb).
-_HOSTNAME_INTERNAL = re.compile(
-    r"(?<![.\w])"
-    r"(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*"  # optional subdomains before TLD
-    r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?"
-    r"\.(?:corp|internal|local|intra|priv|lan|htb|lab)"
-    r"(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*"  # optional labels after TLD
-    r"(?![.\w])"
-)
-
-# Private key blocks (PEM format)
-_PRIVATE_KEY = re.compile(
-    r"-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----"
-    r"[\s\S]*?"
-    r"-----END (?:[A-Z]+ )?PRIVATE KEY-----"
-)
-
-# NTLM hash pairs (LM:NT format, 32 hex chars each)
-_NTLM_HASH = re.compile(
-    r"(?<![0-9a-fA-F])[0-9a-fA-F]{32}:[0-9a-fA-F]{32}(?![0-9a-fA-F])"
-)
-
-# SAM/NTDS dump lines: user:RID:LMhash:NThash:::
-# Covers secretsdump output with optional domain prefix (domain\user or domain/user)
-_SAM_DUMP = re.compile(
-    r"^(?:[^\s:]+[\\\/])?[^\s:]+:\d+:[0-9a-fA-F]{32}:[0-9a-fA-F]{32}:::$",
-    re.MULTILINE,
-)
-
-# NTLMv2 / Net-NTLM hash (Responder/Inveigh captures)
-# Format: user::DOMAIN:challenge:NTLMv2response (challenge is 16 hex, response is long hex)
-_NTLMV2_HASH = re.compile(
-    r"[^\s:]+::[^\s:]*:[0-9a-fA-F]{16}:[0-9a-fA-F]{32}:[0-9a-fA-F]{20,}"
-)
-
-# Kerberos encryption keys from secretsdump LSA output
-# Format: domain\user:aes256-cts-hmac-sha1-96:hexkey
-_KERBEROS_KEY = re.compile(
-    r"[^\s:]+:(?:aes256-cts-hmac-sha1-96|aes128-cts-hmac-sha1-96|des-cbc-md5):[0-9a-fA-F]+"
-)
-
-# Windows built-in identities and registry paths that look like DOMAIN\user
-# but aren't real credentials — skip these in the AD domain\user rule.
-_SKIP_DOMAIN_PREFIXES = frozenset({
-    "NT AUTHORITY", "NT SERVICE", "IIS APPPOOL", "BUILTIN",
-    "AUTHORITY", "SERVICE",      # matched without NT prefix
-    "NT-AUTORITÄT",  # German Windows
-    "AUTORITE NT",   # French Windows
-    "Font",          # Font\Name in CSS/config
-})
-
-# Registry and system path prefixes that contain backslashes
-_SKIP_DOMAIN_PATTERNS = (
-    "HKLM", "HKCU", "HKEY_", "Registry", "Microsoft",
-    "SOFTWARE", "SYSTEM", "Classes", "CurrentVersion",
-)
-
-
-# Well-known Windows user values that are not real credentials
-_SKIP_DOMAIN_USERS = frozenset({
-    "SYSTEM", "NETWORK SERVICE", "LOCAL SERVICE", "LOCALSERVICE",
-    "NETWORKSERVICE", "DefaultAccount", "WDAGUtilityAccount",
-    "IUSR", "DefaultAppPool",
-})
-
-
-def _valid_domain_user(value: str) -> bool:
-    """Skip Windows built-in identities and registry paths."""
-    # Split on first backslash
-    sep = value.find("\\")
-    if sep == -1:
-        return True
-    domain = value[:sep]
-    user = value[sep + 1:].split(":")[0]  # strip optional :password
-    # Skip built-in Windows identities (check both domain and user)
-    if domain.upper() in {s.upper() for s in _SKIP_DOMAIN_PREFIXES}:
-        return False
-    if user.upper() in {s.upper() for s in _SKIP_DOMAIN_USERS}:
-        return False
-    # Skip registry/system paths
-    if any(domain.upper().startswith(p.upper()) for p in _SKIP_DOMAIN_PATTERNS):
-        return False
-    return True
-
-
-# Active Directory domain\username with optional :password
-# Backslash: CORP\user, megacorp.local\user (standard Windows notation)
-# Optional :password captures credentials in tool output (netexec, crackmapexec).
-_AD_DOMAIN_USER_BACKSLASH = re.compile(
-    r"(?<![\w\\])"
-    r"(?:"
-    r"[A-Z][A-Z0-9._-]{0,14}"                          # CORP, CONTOSO.LOCAL
-    r"|[a-zA-Z0-9](?:[a-zA-Z0-9-]*\.)+[a-zA-Z]{2,}"    # megacorp.local (FQDN)
-    r")"
-    r"\\[a-zA-Z0-9._-]+"                                # \username
-    r"(?::[^\s]{4,})?"                                   # optional :password
-    r"(?![\w\\])"
-)
-
-# Impacket-style domain/username with optional :password@host
-# Forward-slash: DOMAIN/user:pass@host, DOMAIN/user@host
-# Username must start with alpha (avoids HTTP/1.1, FTP/2.0, etc.)
-_AD_DOMAIN_USER_SLASH = re.compile(
-    r"(?<![\w\/])"
-    r"(?:"
-    r"[A-Z][A-Z0-9._-]{0,14}"                           # CORP, CONTOSO.LOCAL
-    r"|[a-zA-Z0-9](?:[a-zA-Z0-9-]*\.)+[a-zA-Z]{2,}"     # megacorp.local (FQDN)
-    r")"
-    r"\/[a-zA-Z][a-zA-Z0-9._-]*"                         # /username (must start with alpha)
-    r"(?::[^\s@]{4,})?(?:@[^\s]+)?"                       # optional :password@host
-    r"(?![\w\/])"
-)
-
-# Kerberoast hash ($krb5tgs$) and AS-REP hash ($krb5asrep$)
-# These contain username and domain, plus the hash itself
-_KERBEROS_HASH = re.compile(
-    r"\$krb5(?:tgs|asrep)\$\d*\$[^\s:]+(?:\$[^\s]+)+"
-)
-
-# DCC2 / Domain Cached Credentials
-# Format: $DCC2$10240#username#hash  or  DOMAIN/user:$DCC2$...
-_DCC2_HASH = re.compile(
-    r"(?:[^\s:]*\$)?DCC2\$\d+#[^#]+#[0-9a-fA-F]{32}"
-)
-
-# DPAPI keys (dpapi_machinekey, dpapi_userkey, NL$KM)
-_DPAPI_KEY = re.compile(
-    r"(?:dpapi_machinekey|dpapi_userkey|NL\$KM)\s*:\s*(?:0x)?[0-9a-fA-F]{20,}"
-)
-
-# Machine account plaintext hex password
-_MACHINE_HEX_PASSWORD = re.compile(
-    r"plain_password_hex:[0-9a-fA-F]{32,}"
-)
-
-# Linux home directory paths — redact the username portion
-# Matches /home/username and /root (both expose Linux usernames)
-_LINUX_HOME_PATH = re.compile(
-    r"/(?:home/)([a-zA-Z0-9._-]+)"
-)
-
-# Windows user profile paths — redact the username portion
-_WINDOWS_USER_PATH = re.compile(
-    r"(?i)C:\\\\?Users\\\\?"
-    r"([a-zA-Z0-9._\s-]+?)(?=\\\\|\\|/|\s|$)"
-)
-
-# Windows SID (S-1-5-21-...)
-_WINDOWS_SID = re.compile(
-    r"S-1-5-21-\d+-\d+-\d+(?:-\d+)?"
-)
-
-# UNC paths (\\server\share)
-_UNC_PATH = re.compile(
-    r"\\\\[a-zA-Z0-9._-]+(?:\\[a-zA-Z0-9._$-]+)+"
-)
-
-
-def _context_secret_apply(
+def _group_replace_apply(
     rule: Rule,
     text: str,
     mapping: dict[str, str],
     counters: dict[str, int],
+    group: int,
 ) -> str:
-    """Special handler for context-anchored secrets — redacts only the value part."""
+    """Replace only the specified capture group, preserving the rest of the match.
+
+    Used by context_secret (group 2), cli_flag_secret (group 2),
+    slash_param_secret (group 1), linux_home_path (group 1),
+    and windows_user_path (group 1).
+    """
     placeholder_values = set(mapping.values())
 
     def _replace(match: re.Match[str]) -> str:
-        value = match.group(2)
-        # Skip values that are already placeholders from a prior rule
+        value = match.group(group)
         if value in placeholder_values:
-            full = match.group(0)
-            return full
+            return match.group(0)
 
         if value in mapping:
             placeholder = mapping[value]
@@ -429,10 +97,9 @@ def _context_secret_apply(
             mapping[value] = placeholder
             placeholder_values.add(placeholder)
 
-        # Rebuild the full match with only the value replaced
         full = match.group(0)
-        start = full[: match.start(2) - match.start(0)]
-        end = full[match.end(2) - match.start(0) :]
+        start = full[: match.start(group) - match.start(0)]
+        end = full[match.end(group) - match.start(0) :]
         return start + placeholder + end
 
     return rule.pattern.sub(_replace, text)
@@ -468,65 +135,6 @@ def _cidr_apply(
     return rule.pattern.sub(_replace, text)
 
 
-def _user_path_apply(
-    rule: Rule,
-    text: str,
-    mapping: dict[str, str],
-    counters: dict[str, int],
-) -> str:
-    """Special handler for user paths — redacts only the username portion."""
-    placeholder_values = set(mapping.values())
-
-    def _replace(match: re.Match[str]) -> str:
-        value = match.group(1)
-        if value in placeholder_values:
-            return match.group(0)
-        if value in mapping:
-            placeholder = mapping[value]
-        else:
-            cat = rule.category
-            n = counters.get(cat, 0) + 1
-            counters[cat] = n
-            placeholder = rule.placeholder_template.format(n=n)
-            mapping[value] = placeholder
-            placeholder_values.add(placeholder)
-        full = match.group(0)
-        start = full[: match.start(1) - match.start(0)]
-        end = full[match.end(1) - match.start(0):]
-        return start + placeholder + end
-
-    return rule.pattern.sub(_replace, text)
-
-
-def _slash_param_apply(
-    rule: Rule,
-    text: str,
-    mapping: dict[str, str],
-    counters: dict[str, int],
-) -> str:
-    """Special handler for /param:value — redacts only the value part."""
-    placeholder_values = set(mapping.values())
-
-    def _replace(match: re.Match[str]) -> str:
-        value = match.group(1)
-        if value in placeholder_values:
-            return match.group(0)
-        if value in mapping:
-            placeholder = mapping[value]
-        else:
-            cat = rule.category
-            n = counters.get(cat, 0) + 1
-            counters[cat] = n
-            placeholder = rule.placeholder_template.format(n=n)
-            mapping[value] = placeholder
-            placeholder_values.add(placeholder)
-        full = match.group(0)
-        start = full[: match.start(1) - match.start(0)]
-        return start + placeholder
-
-    return rule.pattern.sub(_replace, text)
-
-
 def _smb_user_pass_apply(
     rule: Rule,
     text: str,
@@ -549,11 +157,312 @@ def _smb_user_pass_apply(
                 placeholder_values.add(placeholder)
         user_ph = mapping.get(user, user)
         pass_ph = mapping.get(password, password)
-        # Reconstruct: preserve leading whitespace and -U
         prefix = match.group(0)[: match.start(1) - match.start(0)]
         return prefix + user_ph + "%" + pass_ph
 
     return rule.pattern.sub(_replace, text)
+
+
+# Convenience factories for apply_fn — avoids repeating the group number.
+def _apply_group(group: int) -> ApplyFn:
+    """Return an apply_fn that replaces a specific capture group."""
+    return lambda rule, text, m, c: _group_replace_apply(rule, text, m, c, group)
+
+
+# ---------------------------------------------------------------------------
+# Validators
+# ---------------------------------------------------------------------------
+
+# IPs that are never sensitive — loopback, unspecified, link-local, documentation.
+_SKIP_IPV4 = frozenset({
+    "127.0.0.1", "0.0.0.0", "255.255.255.255",
+})
+
+# Prefixes that are never target IPs (loopback range, link-local, documentation)
+_SKIP_IPV4_PREFIXES = ("127.", "169.254.", "192.0.2.", "198.51.100.", "203.0.113.")
+
+
+def _valid_ipv4(value: str) -> bool:
+    """Check all octets are 0-255 and not a loopback/special address."""
+    parts = value.split(".")
+    if len(parts) != 4:
+        return False
+    if not all(0 <= int(p) <= 255 for p in parts):
+        return False
+    if value in _SKIP_IPV4:
+        return False
+    if any(value.startswith(p) for p in _SKIP_IPV4_PREFIXES):
+        return False
+    return True
+
+
+def _luhn_check(value: str) -> bool:
+    """Luhn algorithm for credit card validation."""
+    digits = [int(d) for d in value if d.isdigit()]
+    if len(digits) < 13:
+        return False
+    checksum = 0
+    for i, d in enumerate(reversed(digits)):
+        if i % 2 == 1:
+            d *= 2
+            if d > 9:
+                d -= 9
+        checksum += d
+    return checksum % 10 == 0
+
+
+# Public code/tool hosting domains — URLs to these are references to public
+# resources (tools, wordlists, docs), not target infrastructure.
+_PUBLIC_URL_DOMAINS = frozenset({
+    "github.com", "raw.githubusercontent.com", "gist.github.com",
+    "gitlab.com", "bitbucket.org",
+    "exploit-db.com", "cvedetails.com",
+    "attack.mitre.org",
+})
+
+
+def _valid_url(value: str) -> bool:
+    """Skip URLs pointing to well-known public tool/resource domains."""
+    stripped = value.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0].lower()
+    return stripped not in _PUBLIC_URL_DOMAINS
+
+
+# Windows built-in identities and registry paths — not real credentials.
+_SKIP_DOMAIN_PREFIXES = frozenset({
+    "NT AUTHORITY", "NT SERVICE", "IIS APPPOOL", "BUILTIN",
+    "AUTHORITY", "SERVICE",
+    "NT-AUTORITÄT", "AUTORITE NT",
+    "Font",
+})
+
+_SKIP_DOMAIN_PATTERNS = (
+    "HKLM", "HKCU", "HKEY_", "Registry", "Microsoft",
+    "SOFTWARE", "SYSTEM", "Classes", "CurrentVersion",
+)
+
+_SKIP_DOMAIN_USERS = frozenset({
+    "SYSTEM", "NETWORK SERVICE", "LOCAL SERVICE", "LOCALSERVICE",
+    "NETWORKSERVICE", "DefaultAccount", "WDAGUtilityAccount",
+    "IUSR", "DefaultAppPool",
+})
+
+
+def _valid_domain_user(value: str) -> bool:
+    """Skip Windows built-in identities and registry paths."""
+    sep = value.find("\\")
+    if sep == -1:
+        return True
+    domain = value[:sep]
+    user = value[sep + 1:].split(":")[0]
+    if domain.upper() in {s.upper() for s in _SKIP_DOMAIN_PREFIXES}:
+        return False
+    if user.upper() in {s.upper() for s in _SKIP_DOMAIN_USERS}:
+        return False
+    if any(domain.upper().startswith(p.upper()) for p in _SKIP_DOMAIN_PATTERNS):
+        return False
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Compiled regex patterns
+# ---------------------------------------------------------------------------
+
+_IPV4 = re.compile(
+    r"(?<![.\d])"
+    r"(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}"
+    r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)"
+    r"(?![\d]|\.[\d])"
+)
+
+_CIDR = re.compile(
+    r"(?<![.\d])"
+    r"(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}"
+    r"(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)"
+    r"/(?:3[0-2]|[12]?\d)"
+    r"(?![\d/])"
+)
+
+_IPV6 = re.compile(
+    r"(?<![:\w])"
+    r"(?:"
+    r"fe80:(?::[0-9a-fA-F]{1,4}){0,4}%[0-9a-zA-Z]+"
+    r"|(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}"
+    r"|(?:[0-9a-fA-F]{1,4}:){1,7}:"
+    r"|(?:[0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}"
+    r"|(?:[0-9a-fA-F]{1,4}:){1,5}(?::[0-9a-fA-F]{1,4}){2}"
+    r"|(?:[0-9a-fA-F]{1,4}:){1,4}(?::[0-9a-fA-F]{1,4}){3}"
+    r"|(?:[0-9a-fA-F]{1,4}:){1,3}(?::[0-9a-fA-F]{1,4}){4}"
+    r"|(?:[0-9a-fA-F]{1,4}:){1,2}(?::[0-9a-fA-F]{1,4}){5}"
+    r"|[0-9a-fA-F]{1,4}:(?::[0-9a-fA-F]{1,4}){6}"
+    r"|::(?:[0-9a-fA-F]{1,4}:){0,6}[0-9a-fA-F]{1,4}"
+    r")"
+    r"(?![:\w])"
+)
+
+_MAC = re.compile(
+    r"(?<![:\w])"
+    r"(?:"
+    r"[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}"
+    r"|[0-9a-fA-F]{2}(?:-[0-9a-fA-F]{2}){5}"
+    r"|[0-9a-fA-F]{4}\.[0-9a-fA-F]{4}\.[0-9a-fA-F]{4}"
+    r")"
+    r"(?![:\w])"
+)
+
+_EMAIL = re.compile(
+    r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
+)
+
+_PHONE = re.compile(
+    r"(?<!\d)"
+    r"(?:\+?1[-.\s])?"
+    r"(?:"
+    r"\(\d{3}\)[-.\s]?\d{3}[-.\s]\d{4}"
+    r"|\d{3}[-.]\d{3}[-.]\d{4}"
+    r")"
+    r"(?!\d)"
+)
+
+_SSN = re.compile(
+    r"(?<!\d)\d{3}-\d{2}-\d{4}(?!\d)"
+)
+
+_CC = re.compile(
+    r"(?<!\d)(?:\d[ -]?){12,18}\d(?!\d)"
+)
+
+_JWT = re.compile(
+    r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"
+)
+
+_AWS_KEY = re.compile(r"(?<![A-Z0-9])AKIA[0-9A-Z]{16}(?![A-Z0-9])")
+
+_URL = re.compile(
+    r"https?://"
+    r"[^\s<>\"\x27\)\]]*"
+    r"[^\s<>\"\x27\)\].,;:!?\-]"
+)
+
+_CONTEXT_SECRET = re.compile(
+    r"(?i)"
+    r"(?:api[_-]?key|api[_-]?secret|access[_-]?key|private[_-]?key|"
+    r"secret[_-]?key|signing[_-]?key|client[_-]?secret|"
+    r"token|password|passwd|secret|auth|credential|bearer|"
+    r"user\s*id|username|ntlm|domain)"
+    r"(?:\s*[:=]\s*)"
+    r"(['\"]?)([^\s'\"]{4,})\1"
+)
+
+_CLI_FLAG_SECRET = re.compile(
+    r"(?:^|\s)"
+    r"(?:-p|-P|-pw|--password|--pw|-H|--hash|--hashes"
+    r"|-u|-l|--user|--login|--username|-U)"
+    r"\s+"
+    r"(['\"]?)([^\s'\"]{3,})\1"
+    r"(?=\s|$)"
+)
+
+_SLASH_PARAM_SECRET = re.compile(
+    r"\/(?:user|rc4|ntlm|aes256|aes128|des|password|pass|credential|domain)"
+    r":([^\s\/]{3,})"
+)
+
+_SMB_USER_PASS = re.compile(
+    r"(?:^|\s)-U\s+([^\s%]+)%([^\s]{3,})"
+    r"(?=\s|$)"
+)
+
+_HOSTNAME_INTERNAL = re.compile(
+    r"(?<![.\w])"
+    r"(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*"
+    r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?"
+    r"\.(?:corp|internal|local|intra|priv|lan|htb|lab)"
+    r"(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*"
+    r"(?![.\w])"
+)
+
+_PRIVATE_KEY = re.compile(
+    r"-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----"
+    r"[\s\S]*?"
+    r"-----END (?:[A-Z]+ )?PRIVATE KEY-----"
+)
+
+_NTLM_HASH = re.compile(
+    r"(?<![0-9a-fA-F])[0-9a-fA-F]{32}:[0-9a-fA-F]{32}(?![0-9a-fA-F])"
+)
+
+_SAM_DUMP = re.compile(
+    r"^(?:[^\s:]+[\\\/])?[^\s:]+:\d+:[0-9a-fA-F]{32}:[0-9a-fA-F]{32}:::$",
+    re.MULTILINE,
+)
+
+_NTLMV2_HASH = re.compile(
+    r"[^\s:]+::[^\s:]*:[0-9a-fA-F]{16}:[0-9a-fA-F]{32}:[0-9a-fA-F]{20,}"
+)
+
+_KERBEROS_KEY = re.compile(
+    r"[^\s:]+:(?:aes256-cts-hmac-sha1-96|aes128-cts-hmac-sha1-96|des-cbc-md5):[0-9a-fA-F]+"
+)
+
+_AD_DOMAIN_USER_BACKSLASH = re.compile(
+    r"(?<![\w\\])"
+    r"(?:"
+    r"[A-Z][A-Z0-9._-]{0,14}"
+    r"|[a-zA-Z0-9](?:[a-zA-Z0-9-]*\.)+[a-zA-Z]{2,}"
+    r")"
+    r"\\[a-zA-Z0-9._-]+"
+    r"(?::[^\s]{4,})?"
+    r"(?![\w\\])"
+)
+
+_AD_DOMAIN_USER_SLASH = re.compile(
+    r"(?<![\w\/])"
+    r"(?:"
+    r"[A-Z][A-Z0-9._-]{0,14}"
+    r"|[a-zA-Z0-9](?:[a-zA-Z0-9-]*\.)+[a-zA-Z]{2,}"
+    r")"
+    r"\/[a-zA-Z][a-zA-Z0-9._-]*"
+    r"(?::[^\s@]{4,})?(?:@[^\s]+)?"
+    r"(?![\w\/])"
+)
+
+_KERBEROS_HASH = re.compile(
+    r"\$krb5(?:tgs|asrep)\$\d*\$[^\s:]+(?:\$[^\s]+)+"
+)
+
+_DCC2_HASH = re.compile(
+    r"(?:[^\s:]*\$)?DCC2\$\d+#[^#]+#[0-9a-fA-F]{32}"
+)
+
+_DPAPI_KEY = re.compile(
+    r"(?:dpapi_machinekey|dpapi_userkey|NL\$KM)\s*:\s*(?:0x)?[0-9a-fA-F]{20,}"
+)
+
+_MACHINE_HEX_PASSWORD = re.compile(
+    r"plain_password_hex:[0-9a-fA-F]{32,}"
+)
+
+_LINUX_HOME_PATH = re.compile(
+    r"/(?:home/)([a-zA-Z0-9._-]+)"
+)
+
+_WINDOWS_USER_PATH = re.compile(
+    r"(?i)C:\\\\?Users\\\\?"
+    r"([a-zA-Z0-9._\s-]+?)(?=\\\\|\\|/|\s|$)"
+)
+
+_WINDOWS_SID = re.compile(
+    r"S-1-5-21-\d+-\d+-\d+(?:-\d+)?"
+)
+
+_UNC_PATH = re.compile(
+    r"\\\\[a-zA-Z0-9._-]+(?:\\[a-zA-Z0-9._$-]+)+"
+)
+
+
+# ---------------------------------------------------------------------------
+# Rule definitions
+# ---------------------------------------------------------------------------
 
 
 def build_default_rules() -> list[Rule]:
@@ -565,20 +474,6 @@ def build_default_rules() -> list[Rule]:
             priority=5,
             pattern=_PRIVATE_KEY,
             placeholder_template="PRIVATE_KEY_REDACTED_{n:02d}",
-        ),
-        Rule(
-            name="jwt",
-            category="jwt",
-            priority=10,
-            pattern=_JWT,
-            placeholder_template="JWT_REDACTED_{n:02d}",
-        ),
-        Rule(
-            name="aws_key",
-            category="api_key",
-            priority=10,
-            pattern=_AWS_KEY,
-            placeholder_template="API_KEY_{n:02d}",
         ),
         Rule(
             name="kerberos_hash",
@@ -607,6 +502,20 @@ def build_default_rules() -> list[Rule]:
             priority=9,
             pattern=_KERBEROS_KEY,
             placeholder_template="KERBEROS_KEY_{n:02d}",
+        ),
+        Rule(
+            name="jwt",
+            category="jwt",
+            priority=10,
+            pattern=_JWT,
+            placeholder_template="JWT_REDACTED_{n:02d}",
+        ),
+        Rule(
+            name="aws_key",
+            category="api_key",
+            priority=10,
+            pattern=_AWS_KEY,
+            placeholder_template="API_KEY_{n:02d}",
         ),
         Rule(
             name="dcc2_hash",
@@ -642,6 +551,7 @@ def build_default_rules() -> list[Rule]:
             priority=15,
             pattern=_CONTEXT_SECRET,
             placeholder_template="SECRET_{n:02d}",
+            apply_fn=_apply_group(2),
         ),
         Rule(
             name="cli_flag_secret",
@@ -649,6 +559,7 @@ def build_default_rules() -> list[Rule]:
             priority=16,
             pattern=_CLI_FLAG_SECRET,
             placeholder_template="SECRET_{n:02d}",
+            apply_fn=_apply_group(2),
         ),
         Rule(
             name="slash_param_secret",
@@ -656,6 +567,7 @@ def build_default_rules() -> list[Rule]:
             priority=16,
             pattern=_SLASH_PARAM_SECRET,
             placeholder_template="SECRET_{n:02d}",
+            apply_fn=_apply_group(1),
         ),
         Rule(
             name="smb_user_pass",
@@ -663,6 +575,14 @@ def build_default_rules() -> list[Rule]:
             priority=16,
             pattern=_SMB_USER_PASS,
             placeholder_template="SECRET_{n:02d}",
+            apply_fn=_smb_user_pass_apply,
+        ),
+        Rule(
+            name="windows_sid",
+            category="windows_sid",
+            priority=18,
+            pattern=_WINDOWS_SID,
+            placeholder_template="SID_REDACTED_{n:02d}",
         ),
         Rule(
             name="ssn",
@@ -724,18 +644,12 @@ def build_default_rules() -> list[Rule]:
             placeholder_template="UNC_PATH_{n:02d}",
         ),
         Rule(
-            name="windows_sid",
-            category="windows_sid",
-            priority=18,
-            pattern=_WINDOWS_SID,
-            placeholder_template="SID_REDACTED_{n:02d}",
-        ),
-        Rule(
             name="linux_home_path",
             category="secret",
             priority=36,
             pattern=_LINUX_HOME_PATH,
             placeholder_template="SECRET_{n:02d}",
+            apply_fn=_apply_group(1),
         ),
         Rule(
             name="windows_user_path",
@@ -743,6 +657,7 @@ def build_default_rules() -> list[Rule]:
             priority=36,
             pattern=_WINDOWS_USER_PATH,
             placeholder_template="SECRET_{n:02d}",
+            apply_fn=_apply_group(1),
         ),
         Rule(
             name="cidr",
@@ -750,6 +665,7 @@ def build_default_rules() -> list[Rule]:
             priority=39,
             pattern=_CIDR,
             placeholder_template="10.0.0.{n}/24",
+            apply_fn=_cidr_apply,
         ),
         Rule(
             name="ipv4",
@@ -782,28 +698,13 @@ def build_default_rules() -> list[Rule]:
         ),
     ]
 
-    # Override apply for rules with special handlers
-    for r in rules:
-        if r.name in ("context_secret", "cli_flag_secret"):
-            r.apply = lambda text, mapping, counters, _r=r: _context_secret_apply(
-                _r, text, mapping, counters
-            )
-        elif r.name in ("linux_home_path", "windows_user_path"):
-            r.apply = lambda text, mapping, counters, _r=r: _user_path_apply(
-                _r, text, mapping, counters
-            )
-        elif r.name == "slash_param_secret":
-            r.apply = lambda text, mapping, counters, _r=r: _slash_param_apply(
-                _r, text, mapping, counters
-            )
-        elif r.name == "smb_user_pass":
-            r.apply = lambda text, mapping, counters, _r=r: _smb_user_pass_apply(
-                _r, text, mapping, counters
-            )
-        elif r.name == "cidr":
-            r.apply = lambda text, mapping, counters, _r=r: _cidr_apply(
-                _r, text, mapping, counters
-            )
-
     rules.sort(key=lambda r: r.priority)
     return rules
+
+
+def get_placeholder_templates() -> list[str]:
+    """Return all placeholder template strings from the default rules.
+
+    Used by llm.py to auto-generate the placeholder regex.
+    """
+    return [r.placeholder_template for r in build_default_rules()]

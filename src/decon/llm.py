@@ -8,40 +8,38 @@ import sys
 import urllib.request
 import urllib.error
 
+from decon.patterns import get_placeholder_templates
+
 # Maximum characters to send to the LLM (avoids context overflow on large files)
 MAX_LLM_CHARS = 12000
 
-# Patterns that match DECON's own placeholder values
-_PLACEHOLDER_RE = re.compile(
-    r"^(?:"
-    r"10\.0\.0\.\d+"            # IPv4 placeholders
-    r"|fd00::[0-9a-fA-F]+"     # IPv6 placeholders
-    r"|10\.0\.0\.\d+/\d+"      # CIDR placeholders
-    r"|user_\d+@example\.com"   # email placeholders
-    r"|HOST_\d+\.example\.internal"  # hostname placeholders
-    r"|00:DE:AD:00:00:[0-9A-F]+"    # MAC placeholders
-    r"|SECRET_\d+"              # secret placeholders
-    r"|API_KEY_\d+"             # API key placeholders
-    r"|JWT_REDACTED_\d+"        # JWT placeholders
-    r"|URL_REDACTED_\d+"        # URL placeholders
-    r"|SSN_REDACTED_\d+"        # SSN placeholders
-    r"|CC_REDACTED_\d+"         # credit card placeholders
-    r"|NTLM_HASH_\d+"          # NTLM hash placeholders
-    r"|NTLMV2_HASH_\d+"        # NTLMv2 hash placeholders
-    r"|SAM_DUMP_\d+"            # SAM/NTDS dump placeholders
-    r"|KERBEROS_KEY_\d+"        # Kerberos key placeholders
-    r"|KERBEROS_HASH_\d+"       # Kerberoast/AS-REP placeholders
-    r"|DCC2_HASH_\d+"           # DCC2 cached credential placeholders
-    r"|DPAPI_KEY_\d+"           # DPAPI key placeholders
-    r"|MACHINE_HEX_PW_\d+"     # Machine hex password placeholders
-    r"|SID_REDACTED_\d+"        # Windows SID placeholders
-    r"|DOMAIN_USER_\d+"         # AD domain\user placeholders
-    r"|UNC_PATH_\d+"            # UNC path placeholders
-    r"|PRIVATE_KEY_REDACTED_\d+"  # private key placeholders
-    r"|REDACTED_\d+"            # custom value placeholders
-    r"|\(555\) 555-\d+"        # phone placeholders
-    r")$"
-)
+
+def _build_placeholder_re() -> re.Pattern[str]:
+    """Auto-generate a regex matching all DECON placeholder formats.
+
+    Derived from the actual placeholder_template strings in build_default_rules()
+    so new rules are automatically covered without manual updates here.
+    """
+    fragments: list[str] = []
+    for tmpl in get_placeholder_templates():
+        # Escape regex-special chars in the literal parts
+        escaped = re.escape(tmpl)
+        # Replace format specifiers with appropriate regex patterns
+        # {n:02d}, {n:04d}, {n} -> \d+
+        # {n:x}, {n:02X} -> [0-9a-fA-F]+
+        escaped = re.sub(r"\\{n(?::[^}]*)?\\}", lambda m: (
+            r"[0-9a-fA-F]+" if any(c in m.group() for c in "xX")
+            else r"\d+"
+        ), escaped)
+        fragments.append(escaped)
+
+    # Also match custom value placeholders (from add_custom_values)
+    fragments.append(r"REDACTED_\d+")
+
+    return re.compile(r"^(?:" + "|".join(fragments) + r")$")
+
+
+_PLACEHOLDER_RE = _build_placeholder_re()
 
 
 REVIEW_PROMPT = """\
