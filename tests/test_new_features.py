@@ -1375,3 +1375,73 @@ class TestRealisticCommandLines:
         text = "smbclient //10.10.14.5/ADMIN$ -U admin%Secret123!"
         result = RedactionEngine().redact(text)
         assert "Secret123!" not in result
+
+    def test_krbtgt_param(self):
+        text = "rubeus /krbtgt:9d765b482771505cbe97411065964d5f"
+        result = RedactionEngine().redact(text)
+        assert "9d765b48" not in result
+
+
+# ---------------------------------------------------------------------------
+# False positive regression tests
+# ---------------------------------------------------------------------------
+
+
+class TestSlashAbbreviationFalsePositives:
+    """Common abbreviations with / should NOT be matched as domain/user."""
+
+    def test_smb_wmi(self):
+        assert RedactionEngine().redact("SMB/WMI") == "SMB/WMI"
+
+    def test_tgt_tgs(self):
+        assert RedactionEngine().redact("TGT/TGS") == "TGT/TGS"
+
+    def test_rw(self):
+        assert RedactionEngine().redact("R/W access") == "R/W access"
+
+    def test_gnu_linux(self):
+        assert RedactionEngine().redact("GNU/Linux") == "GNU/Linux"
+
+    def test_kb_s(self):
+        assert RedactionEngine().redact("150 KB/s") == "150 KB/s"
+
+    def test_lfi_rfi(self):
+        assert RedactionEngine().redact("LFI/RFI") == "LFI/RFI"
+
+    def test_real_domain_slash_still_caught(self):
+        result = RedactionEngine().redact("CORP/admin")
+        assert "DOMAIN_USER_" in result
+
+    def test_long_domain_slash_caught(self):
+        result = RedactionEngine().redact("INLANEFREIGHT/julio")
+        assert "DOMAIN_USER_" in result
+
+    def test_fqdn_slash_caught(self):
+        result = RedactionEngine().redact("acme.corp/svc_sql")
+        assert "DOMAIN_USER_" in result
+
+
+class TestCLIFlagFalsePositives:
+    """File paths and template values after CLI flags should NOT be redacted."""
+
+    def test_wordlist_path(self):
+        result = RedactionEngine().redact("hydra -P /usr/share/wordlists/rockyou.txt")
+        assert "/usr/share" in result
+
+    def test_filename_extension(self):
+        result = RedactionEngine().redact("hydra -l user.list target")
+        assert "user.list" in result
+
+    def test_password_file(self):
+        result = RedactionEngine().redact("hydra -p passwords.txt target")
+        assert "passwords.txt" in result
+
+    def test_template_placeholder(self):
+        result = RedactionEngine().redact("nxc -u <username> -p <password>")
+        assert "<username>" in result
+        assert "<password>" in result
+
+    def test_real_credentials_still_caught(self):
+        result = RedactionEngine().redact("nxc -u fcastle -p Password1")
+        assert "fcastle" not in result
+        assert "Password1" not in result

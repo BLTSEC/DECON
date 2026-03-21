@@ -169,6 +169,41 @@ def _apply_group(group: int) -> ApplyFn:
     return lambda rule, text, m, c: _group_replace_apply(rule, text, m, c, group)
 
 
+def _cli_flag_apply(
+    rule: Rule,
+    text: str,
+    mapping: dict[str, str],
+    counters: dict[str, int],
+) -> str:
+    """Apply CLI flag secret rule, skipping file paths and template placeholders."""
+    placeholder_values = set(mapping.values())
+
+    def _replace(match: re.Match[str]) -> str:
+        value = match.group(2)
+        # Skip file paths, template placeholders, and other non-secret values
+        if _CLI_FLAG_SKIP_RE.match(value):
+            return match.group(0)
+        if value in placeholder_values:
+            return match.group(0)
+
+        if value in mapping:
+            placeholder = mapping[value]
+        else:
+            cat = rule.category
+            n = counters.get(cat, 0) + 1
+            counters[cat] = n
+            placeholder = rule.placeholder_template.format(n=n)
+            mapping[value] = placeholder
+            placeholder_values.add(placeholder)
+
+        full = match.group(0)
+        start = full[: match.start(2) - match.start(0)]
+        end = full[match.end(2) - match.start(0) :]
+        return start + placeholder + end
+
+    return rule.pattern.sub(_replace, text)
+
+
 # ---------------------------------------------------------------------------
 # Validators
 # ---------------------------------------------------------------------------
@@ -362,8 +397,18 @@ _CLI_FLAG_SECRET = re.compile(
     r"(?=\s|$)"
 )
 
+# Values that look like file paths, template placeholders, or flags — not secrets
+_CLI_FLAG_SKIP_RE = re.compile(
+    r"^(?:"
+    r"[/<]"                       # starts with / (path) or < (template placeholder)
+    r"|.*\.\w{2,4}$"              # ends with file extension (.txt, .list, etc.)
+    r"|None\b"                    # Python None in output
+    r"|-"                         # another flag
+    r")"
+)
+
 _SLASH_PARAM_SECRET = re.compile(
-    r"\/(?:user|rc4|ntlm|aes256|aes128|des|password|pass|credential|domain)"
+    r"\/(?:user|rc4|ntlm|aes256|aes128|des|password|pass|credential|domain|krbtgt)"
     r":([^\s\/]{3,})"
 )
 
@@ -415,14 +460,16 @@ _AD_DOMAIN_USER_BACKSLASH = re.compile(
     r"(?![\w\\])"
 )
 
+# Forward-slash requires FQDN domain (with dots) OR uppercase domain of 4+ chars
+# to avoid matching abbreviations like SMB/WMI, TGT/TGS, R/W, GNU/Linux.
 _AD_DOMAIN_USER_SLASH = re.compile(
     r"(?<![\w\/])"
     r"(?:"
-    r"[A-Z][A-Z0-9._-]{0,14}"
-    r"|[a-zA-Z0-9](?:[a-zA-Z0-9-]*\.)+[a-zA-Z]{2,}"
+    r"[A-Z][A-Z0-9]{3,14}"                              # CORP, INLANEFREIGHT (4+ uppercase)
+    r"|[a-zA-Z0-9](?:[a-zA-Z0-9-]*\.)+[a-zA-Z]{2,}"     # megacorp.local (FQDN)
     r")"
-    r"\/[a-zA-Z][a-zA-Z0-9._-]*"
-    r"(?::[^\s@]{4,})?(?:@[^\s]+)?"
+    r"\/[a-zA-Z][a-zA-Z0-9._-]*"                         # /username (must start with alpha)
+    r"(?::[^\s@]{4,})?(?:@[^\s]+)?"                       # optional :password@host
     r"(?![\w\/])"
 )
 
@@ -559,7 +606,7 @@ def build_default_rules() -> list[Rule]:
             priority=16,
             pattern=_CLI_FLAG_SECRET,
             placeholder_template="SECRET_{n:02d}",
-            apply_fn=_apply_group(2),
+            apply_fn=_cli_flag_apply,
         ),
         Rule(
             name="slash_param_secret",
