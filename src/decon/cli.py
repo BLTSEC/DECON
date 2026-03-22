@@ -7,10 +7,12 @@ import difflib
 import os
 import sys
 from pathlib import Path
+from typing import Callable
 
 from decon import __version__
 from decon.engine import RedactionEngine
 from decon.config import (
+    ConfigError,
     apply_config_to_engine,
     get_llm_config,
     init_config,
@@ -24,6 +26,11 @@ from decon.output import (
     write_stdout,
 )
 from decon.llm import llm_review
+
+
+def _split_csv(value: str) -> list[str]:
+    """Split a comma-separated CLI value list, dropping empty entries."""
+    return [item.strip() for item in value.split(",") if item.strip()]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -196,14 +203,22 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     # Load config
-    config = load_config()
+    try:
+        config = load_config()
+    except ConfigError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
 
     # Build engine
     engine = RedactionEngine()
 
     # Apply config (profile from arg, env var, or config default)
     profile = args.profile or os.environ.get("DECON_PROFILE")
-    apply_config_to_engine(engine, config, profile)
+    try:
+        apply_config_to_engine(engine, config, profile)
+    except ConfigError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
 
     # --list-rules: show rules and exit
     if args.list_rules:
@@ -216,27 +231,20 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     # CLI --enable/--disable overrides
-    if args.enable:
-        for name in args.enable.split(","):
-            name = name.strip()
-            try:
-                engine.enable_rule(name)
-            except ValueError:
-                print(f"Unknown rule: {name}", file=sys.stderr)
-                return 1
-
-    if args.disable:
-        for name in args.disable.split(","):
-            name = name.strip()
-            try:
-                engine.disable_rule(name)
-            except ValueError:
-                print(f"Unknown rule: {name}", file=sys.stderr)
-                return 1
+    for flag_value, action in (
+        (args.enable, engine.enable_rule),
+        (args.disable, engine.disable_rule),
+    ):
+        if not flag_value:
+            continue
+        err = _apply_rule_names(_split_csv(flag_value), action)
+        if err:
+            print(f"Unknown rule: {err}", file=sys.stderr)
+            return 1
 
     # Allowlist
     if args.allow:
-        engine.add_allowlist([v.strip() for v in args.allow.split(",")])
+        engine.add_allowlist(_split_csv(args.allow))
 
     # Import prior mapping
     if args.import_map:
@@ -262,28 +270,24 @@ def main(argv: list[str] | None = None) -> int:
 
     # --output-dir mode: batch process files
     if args.output_dir:
-        return _batch_process(args, engine, config)
+        return _batch_process(args, engine)
 
     # Gather input
     text = _read_input(args)
     if text is None:
         return 1
 
-    # Snapshot mapping size to detect new redactions (ignores allowlist/imported entries)
-    mapping_before = len(engine.mapping)
-
     # Redact
-    result = engine.redact(text)
-
-    new_redactions = len(engine.mapping) - mapping_before
+    report = engine.redact_with_report(text)
+    result = report.text
+    applied_redactions = report.unique_applied()
+    changed = report.changed
 
     # --check mode: exit non-zero if new redactions found
     if args.check:
-        if new_redactions > 0:
-            stats = engine.get_stats()
-            total = sum(stats.values())
-            print(f"Found {total} value(s) to redact:", file=sys.stderr)
-            for cat, count in sorted(stats.items()):
+        if changed:
+            print(f"Found {len(applied_redactions)} value(s) to redact:", file=sys.stderr)
+            for cat, count in sorted(_stats_for_applied(applied_redactions).items()):
                 print(f"  {cat}: {count}", file=sys.stderr)
             return 1
         if not args.quiet:
@@ -292,16 +296,13 @@ def main(argv: list[str] | None = None) -> int:
 
     # --dry-run: show mapping instead of output
     if args.dry_run:
-        if new_redactions == 0:
+        if not changed:
             print("No redactions found.", file=sys.stderr)
         else:
             print("Redactions that would be applied:", file=sys.stderr)
-            for real, placeholder in sorted(
-                engine.mapping.items(), key=lambda x: x[1]
+            for _category, real, placeholder in sorted(
+                applied_redactions, key=lambda x: x[2]
             ):
-                # Skip allowlist identity mappings
-                if real == placeholder:
-                    continue
                 print(f"  {real} -> {placeholder}", file=sys.stderr)
         return 0
 
@@ -318,7 +319,11 @@ def main(argv: list[str] | None = None) -> int:
 
     # LLM review
     llm_cfg = get_llm_config(config)
-    use_llm = args.llm or os.environ.get("DECON_LLM") == "1" or llm_cfg.get("enabled", False)
+    use_llm = (
+        args.llm
+        or os.environ.get("DECON_LLM") == "1"
+        or llm_cfg.get("enabled", False)
+    )
 
     if use_llm:
         review = llm_review(
@@ -349,7 +354,7 @@ def _write_output(args: argparse.Namespace, result: str) -> None:
     if args.output:
         write_file(result, args.output, quiet=args.quiet)
     elif args.clipboard:
-        write_clipboard(result)
+        write_clipboard(result, quiet=args.quiet)
     else:
         write_stdout(result)
 
@@ -366,13 +371,26 @@ def _export_map(args: argparse.Namespace, engine: RedactionEngine) -> None:
             print(f"Mapping exported to {args.export_map}", file=sys.stderr)
 
 
+def _apply_rule_names(
+    rule_names: list[str],
+    action: Callable[[str], None],
+) -> str | None:
+    """Apply an enable/disable action for each rule name."""
+    for name in rule_names:
+        try:
+            action(name)
+        except ValueError:
+            return name
+    return None
+
+
 def _batch_process(
     args: argparse.Namespace,
     engine: RedactionEngine,
-    config: dict,
 ) -> int:
     """Process multiple files, writing each to output-dir."""
     os.makedirs(args.output_dir, exist_ok=True)
+    output_paths = _build_batch_output_paths(args.files, args.output_dir)
 
     for path in args.files:
         try:
@@ -383,8 +401,8 @@ def _batch_process(
             return 1
 
         result = engine.redact(text)
-        p = Path(path)
-        out_path = Path(args.output_dir) / f"{p.stem}.redacted{p.suffix}"
+        out_path = output_paths[path]
+        out_path.parent.mkdir(parents=True, exist_ok=True)
         write_file(result, str(out_path), quiet=args.quiet)
 
     _export_map(args, engine)
@@ -404,19 +422,52 @@ def _print_stats(args: argparse.Namespace, engine: RedactionEngine) -> None:
             print("No redactions performed.", file=sys.stderr)
 
 
+def _build_batch_output_paths(
+    input_paths: list[str], output_dir: str
+) -> dict[str, Path]:
+    """Build unique output paths for batch processing."""
+    resolved_parents = [str(Path(path).resolve().parent) for path in input_paths]
+    common_parent = Path(os.path.commonpath(resolved_parents))
+    output_root = Path(output_dir)
+    output_paths: dict[str, Path] = {}
+
+    for raw_path in input_paths:
+        path = Path(raw_path).resolve()
+        try:
+            rel_path = path.relative_to(common_parent)
+        except ValueError:
+            rel_path = Path(path.name)
+        out_path = output_root / rel_path.parent / f"{path.stem}.redacted{path.suffix}"
+        output_paths[raw_path] = out_path
+
+    return output_paths
+
+
+def _stats_for_applied(
+    applied: list[tuple[str, str, str]]
+) -> dict[str, int]:
+    """Return category counts for applied redactions."""
+    stats: dict[str, int] = {}
+    for category, _real, _placeholder in applied:
+        stats[category] = stats.get(category, 0) + 1
+    return stats
+
+
 def _read_input(args: argparse.Namespace) -> str | None:
     """Read input from files, stdin, clipboard, or tmux."""
     texts: list[str] = []
 
     if args.tmux:
-        text = capture_tmux_pane()
-        if text:
-            texts.append(text)
+        text = capture_tmux_pane(quiet=args.quiet)
+        if text is None:
+            return None
+        texts.append(text)
 
     if args.clipboard_in:
-        text = read_clipboard()
-        if text:
-            texts.append(text)
+        text = read_clipboard(quiet=args.quiet)
+        if text is None:
+            return None
+        texts.append(text)
 
     if args.files:
         for path in args.files:

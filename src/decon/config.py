@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 import tomllib
 from pathlib import Path
@@ -39,6 +40,10 @@ target_domains = []  # target domains — auto-generates hostname rules
 """
 
 
+class ConfigError(ValueError):
+    """Raised when the DECON config file is invalid."""
+
+
 def load_config(path: Path | None = None) -> dict:
     """Load and parse the TOML config file."""
     if path is None:
@@ -47,8 +52,13 @@ def load_config(path: Path | None = None) -> dict:
     if not path.exists():
         return {}
 
-    with open(path, "rb") as f:
-        return tomllib.load(f)
+    try:
+        with open(path, "rb") as f:
+            return tomllib.load(f)
+    except tomllib.TOMLDecodeError as e:
+        raise ConfigError(f"Invalid TOML in config {path}: {e}") from e
+    except OSError as e:
+        raise ConfigError(f"Could not read config {path}: {e}") from e
 
 
 def resolve_profile(config: dict, profile: str | None = None) -> dict:
@@ -85,12 +95,24 @@ def apply_config_to_engine(engine, config: dict, profile: str | None = None) -> 
         engine.add_custom_values(values_nocase, case_sensitive=False)
 
     # Custom regex patterns
-    for pat in custom.get("patterns", []):
-        engine.add_custom_pattern(
-            name=pat.get("name", "custom"),
-            pattern=pat["pattern"],
-            replacement=pat.get("replacement", "REDACTED_{n:02d}"),
-        )
+    for i, pat in enumerate(custom.get("patterns", []), start=1):
+        if not isinstance(pat, dict):
+            raise ConfigError(
+                f"custom.patterns[{i}] must be a table with at least a pattern"
+            )
+        pattern = pat.get("pattern")
+        if not pattern:
+            raise ConfigError(f"custom.patterns[{i}] is missing required key: pattern")
+        try:
+            engine.add_custom_pattern(
+                name=pat.get("name", "custom"),
+                pattern=pattern,
+                replacement=pat.get("replacement", "REDACTED_{n:02d}"),
+            )
+        except re.error as e:
+            raise ConfigError(
+                f"Invalid regex in custom.patterns[{i}] ({pat.get('name', 'custom')}): {e}"
+            ) from e
 
     # Target domains
     target_domains = custom.get("target_domains", [])
@@ -117,7 +139,7 @@ def init_config() -> Path:
     if path.exists():
         print(f"Config already exists: {path}", file=sys.stderr)
     else:
-        path.write_text(DEFAULT_CONFIG)
+        path.write_text(DEFAULT_CONFIG, encoding="utf-8")
         print(f"Created config: {path}", file=sys.stderr)
     return path
 

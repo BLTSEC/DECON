@@ -75,6 +75,7 @@ class TestCustomValues:
         result = engine.redact("User JSMITH logged in as jsmith")
         assert "JSMITH" not in result
         assert "jsmith" not in result
+        assert result.count("REDACTED_01") == 2
 
 
 class TestCustomPattern:
@@ -88,6 +89,16 @@ class TestCustomPattern:
         result = engine.redact("ssh to db01.corp.acme.com")
         assert "db01.corp.acme.com" not in result
         assert "HOST_01.example.internal" in result
+
+
+class TestTargetDomains:
+    def test_target_domains_are_case_insensitive(self):
+        engine = RedactionEngine()
+        engine.add_target_domains(["contoso.com"])
+        result = engine.redact("MAIL.CONTOSO.COM and Mail.Contoso.Com")
+        assert "MAIL.CONTOSO.COM" not in result
+        assert "Mail.Contoso.Com" not in result
+        assert result.count("HOST_01.example.internal") == 2
 
 
 class TestExportImportMap:

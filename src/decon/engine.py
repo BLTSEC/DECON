@@ -8,6 +8,32 @@ from dataclasses import dataclass, field
 
 from decon.patterns import Rule, build_default_rules
 
+AppliedRedaction = tuple[str, str, str]
+
+
+@dataclass
+class RedactionReport:
+    """Detailed result for a single redaction pass."""
+
+    text: str
+    applied: list[AppliedRedaction]
+
+    @property
+    def changed(self) -> bool:
+        """Whether any replacements were applied."""
+        return bool(self.applied)
+
+    def unique_applied(self) -> list[AppliedRedaction]:
+        """Return applied replacements in first-seen order without duplicates."""
+        seen: set[AppliedRedaction] = set()
+        unique: list[AppliedRedaction] = []
+        for item in self.applied:
+            if item in seen:
+                continue
+            seen.add(item)
+            unique.append(item)
+        return unique
+
 
 @dataclass
 class RedactionEngine:
@@ -23,11 +49,16 @@ class RedactionEngine:
 
     def redact(self, text: str) -> str:
         """Redact sensitive data from text using all enabled rules."""
+        return self.redact_with_report(text).text
+
+    def redact_with_report(self, text: str) -> RedactionReport:
+        """Redact text and return details about replacements applied."""
+        applied: list[AppliedRedaction] = []
         for rule in self.rules:
             if not rule.enabled:
                 continue
-            text = rule.apply(text, self.mapping, self.counters)
-        return text
+            text = rule.apply(text, self.mapping, self.counters, applied)
+        return RedactionReport(text=text, applied=applied)
 
     def unredact(self, text: str) -> str:
         """Replace placeholders with original values using reverse mapping."""
@@ -73,9 +104,9 @@ class RedactionEngine:
                 priority=50,
                 pattern=pattern,
                 placeholder_template="REDACTED_{n:02d}",
+                mapping_key_fn=(str.casefold if not case_sensitive else None),
             )
-            self.rules.append(rule)
-        self.rules.sort(key=lambda r: r.priority)
+            self._add_rule(rule)
 
     def add_custom_pattern(
         self,
@@ -91,8 +122,7 @@ class RedactionEngine:
             pattern=re.compile(pattern),
             placeholder_template=replacement,
         )
-        self.rules.append(rule)
-        self.rules.sort(key=lambda r: r.priority)
+        self._add_rule(rule)
 
     def add_target_domains(self, domains: list[str]) -> None:
         """Add target domain rules that match any subdomain."""
@@ -102,7 +132,8 @@ class RedactionEngine:
                 r"(?<![.\w])"
                 r"(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)*"
                 + escaped
-                + r"(?![.\w])"
+                + r"(?![.\w])",
+                re.IGNORECASE,
             )
             rule = Rule(
                 name=f"target_{domain}",
@@ -110,13 +141,13 @@ class RedactionEngine:
                 priority=44,
                 pattern=pattern,
                 placeholder_template="HOST_{n:02d}.example.internal",
+                mapping_key_fn=str.casefold,
             )
-            self.rules.append(rule)
-        self.rules.sort(key=lambda r: r.priority)
+            self._add_rule(rule)
 
     def export_map(self, path: str) -> None:
         """Export the current mapping to a JSON file."""
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(
                 {"mapping": self.mapping, "counters": self.counters},
                 f,
@@ -125,7 +156,7 @@ class RedactionEngine:
 
     def import_map(self, path: str) -> None:
         """Import a mapping from a JSON file for cross-file consistency."""
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
         self.mapping.update(data.get("mapping", {}))
         for cat, count in data.get("counters", {}).items():
@@ -146,3 +177,8 @@ class RedactionEngine:
             }
             for r in self.rules
         ]
+
+    def _add_rule(self, rule: Rule) -> None:
+        """Add a rule and keep rule order stable by priority."""
+        self.rules.append(rule)
+        self.rules.sort(key=lambda r: r.priority)
