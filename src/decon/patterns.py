@@ -3,13 +3,22 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable
 
 
 # Type alias for custom apply functions.
-# Signature: (rule, text, mapping, counters) -> str
-ApplyFn = Callable[["Rule", str, dict[str, str], dict[str, int]], str]
+# Signature: (rule, text, mapping, counters, applied) -> str
+ApplyFn = Callable[
+    [
+        "Rule",
+        str,
+        dict[str, str],
+        dict[str, int],
+        list[tuple[str, str, str]] | None,
+    ],
+    str,
+]
 
 
 @dataclass
@@ -24,22 +33,25 @@ class Rule:
     enabled: bool = True
     validator: Callable[[str], bool] | None = None
     apply_fn: ApplyFn | None = None
+    mapping_key_fn: Callable[[str], str] | None = None
 
     def apply(
         self,
         text: str,
         mapping: dict[str, str],
         counters: dict[str, int],
+        applied: list[tuple[str, str, str]] | None = None,
     ) -> str:
         """Apply this rule to text, updating mapping and counters."""
         if self.apply_fn:
-            return self.apply_fn(self, text, mapping, counters)
+            return self.apply_fn(self, text, mapping, counters, applied)
 
         # Default: replace the entire match with a placeholder.
         placeholder_values = set(mapping.values())
 
         def _replace(match: re.Match[str]) -> str:
             value = match.group(0)
+            mapping_key = self.mapping_key_fn(value) if self.mapping_key_fn else value
 
             if self.validator and not self.validator(value):
                 return value
@@ -47,16 +59,21 @@ class Rule:
             if value in placeholder_values:
                 return value
 
-            if value in mapping:
-                return mapping[value]
+            if mapping_key in mapping:
+                placeholder = mapping[mapping_key]
+                if applied is not None:
+                    applied.append((self.category, value, placeholder))
+                return placeholder
 
             cat = self.category
             n = counters.get(cat, 0) + 1
             counters[cat] = n
 
             placeholder = self.placeholder_template.format(n=n)
-            mapping[value] = placeholder
+            mapping[mapping_key] = placeholder
             placeholder_values.add(placeholder)
+            if applied is not None:
+                applied.append((self.category, value, placeholder))
             return placeholder
 
         return self.pattern.sub(_replace, text)
@@ -73,6 +90,7 @@ def _group_replace_apply(
     mapping: dict[str, str],
     counters: dict[str, int],
     group: int,
+    applied: list[tuple[str, str, str]] | None = None,
 ) -> str:
     """Replace only the specified capture group, preserving the rest of the match.
 
@@ -84,19 +102,22 @@ def _group_replace_apply(
 
     def _replace(match: re.Match[str]) -> str:
         value = match.group(group)
+        mapping_key = rule.mapping_key_fn(value) if rule.mapping_key_fn else value
         if value in placeholder_values:
             return match.group(0)
 
-        if value in mapping:
-            placeholder = mapping[value]
+        if mapping_key in mapping:
+            placeholder = mapping[mapping_key]
         else:
             cat = rule.category
             n = counters.get(cat, 0) + 1
             counters[cat] = n
             placeholder = rule.placeholder_template.format(n=n)
-            mapping[value] = placeholder
+            mapping[mapping_key] = placeholder
             placeholder_values.add(placeholder)
 
+        if applied is not None:
+            applied.append((rule.category, value, placeholder))
         full = match.group(0)
         start = full[: match.start(group) - match.start(0)]
         end = full[match.end(group) - match.start(0) :]
@@ -110,6 +131,7 @@ def _cidr_apply(
     text: str,
     mapping: dict[str, str],
     counters: dict[str, int],
+    applied: list[tuple[str, str, str]] | None = None,
 ) -> str:
     """Special handler for CIDR — preserves the original subnet mask."""
     placeholder_values = set(mapping.values())
@@ -121,7 +143,10 @@ def _cidr_apply(
             return value
 
         if value in mapping:
-            return mapping[value]
+            placeholder = mapping[value]
+            if applied is not None:
+                applied.append((rule.category, value, placeholder))
+            return placeholder
 
         _ip, mask = value.rsplit("/", 1)
         cat = rule.category
@@ -130,6 +155,8 @@ def _cidr_apply(
         placeholder = f"10.0.0.{n}/{mask}"
         mapping[value] = placeholder
         placeholder_values.add(placeholder)
+        if applied is not None:
+            applied.append((rule.category, value, placeholder))
         return placeholder
 
     return rule.pattern.sub(_replace, text)
@@ -140,6 +167,7 @@ def _smb_user_pass_apply(
     text: str,
     mapping: dict[str, str],
     counters: dict[str, int],
+    applied: list[tuple[str, str, str]] | None = None,
 ) -> str:
     """Special handler for -U user%password — redacts both user and password."""
     placeholder_values = set(mapping.values())
@@ -148,15 +176,21 @@ def _smb_user_pass_apply(
         user = match.group(1)
         password = match.group(2)
         for value in (user, password):
-            if value not in mapping and value not in placeholder_values:
+            mapping_key = rule.mapping_key_fn(value) if rule.mapping_key_fn else value
+            if mapping_key not in mapping and value not in placeholder_values:
                 cat = rule.category
                 n = counters.get(cat, 0) + 1
                 counters[cat] = n
                 placeholder = rule.placeholder_template.format(n=n)
-                mapping[value] = placeholder
+                mapping[mapping_key] = placeholder
                 placeholder_values.add(placeholder)
-        user_ph = mapping.get(user, user)
-        pass_ph = mapping.get(password, password)
+        user_key = rule.mapping_key_fn(user) if rule.mapping_key_fn else user
+        pass_key = rule.mapping_key_fn(password) if rule.mapping_key_fn else password
+        user_ph = mapping.get(user_key, user)
+        pass_ph = mapping.get(pass_key, password)
+        if applied is not None:
+            applied.append((rule.category, user, user_ph))
+            applied.append((rule.category, password, pass_ph))
         prefix = match.group(0)[: match.start(1) - match.start(0)]
         return prefix + user_ph + "%" + pass_ph
 
@@ -166,7 +200,9 @@ def _smb_user_pass_apply(
 # Convenience factories for apply_fn — avoids repeating the group number.
 def _apply_group(group: int) -> ApplyFn:
     """Return an apply_fn that replaces a specific capture group."""
-    return lambda rule, text, m, c: _group_replace_apply(rule, text, m, c, group)
+    return lambda rule, text, m, c, a: _group_replace_apply(
+        rule, text, m, c, group, a
+    )
 
 
 def _cli_flag_apply(
@@ -174,28 +210,32 @@ def _cli_flag_apply(
     text: str,
     mapping: dict[str, str],
     counters: dict[str, int],
+    applied: list[tuple[str, str, str]] | None = None,
 ) -> str:
     """Apply CLI flag secret rule, skipping file paths and template placeholders."""
     placeholder_values = set(mapping.values())
 
     def _replace(match: re.Match[str]) -> str:
         value = match.group(2)
+        mapping_key = rule.mapping_key_fn(value) if rule.mapping_key_fn else value
         # Skip file paths, template placeholders, and other non-secret values
         if _CLI_FLAG_SKIP_RE.match(value):
             return match.group(0)
         if value in placeholder_values:
             return match.group(0)
 
-        if value in mapping:
-            placeholder = mapping[value]
+        if mapping_key in mapping:
+            placeholder = mapping[mapping_key]
         else:
             cat = rule.category
             n = counters.get(cat, 0) + 1
             counters[cat] = n
             placeholder = rule.placeholder_template.format(n=n)
-            mapping[value] = placeholder
+            mapping[mapping_key] = placeholder
             placeholder_values.add(placeholder)
 
+        if applied is not None:
+            applied.append((rule.category, value, placeholder))
         full = match.group(0)
         start = full[: match.start(2) - match.start(0)]
         end = full[match.end(2) - match.start(0) :]

@@ -56,6 +56,10 @@ decon --diff scan_results.txt
 decon --check scan_results.txt && echo "clean" || echo "needs redaction"
 ```
 
+If you explicitly request an input source with `--tmux` or `--clipboard-in` and
+DECON can't read it, the command exits non-zero instead of silently falling back
+to stdin.
+
 ## How It Works
 
 The core feature is **consistent placeholder mapping** — the same real value gets the same placeholder every time it appears, across the entire input. This means IP topology, user actions, and host groupings are preserved in the sanitized output.
@@ -87,7 +91,7 @@ Rules are applied in priority order to prevent partial matches (e.g., JWTs are m
 | Secrets | `api_key="sk_live_..."` | `api_key="SECRET_01"` | 15 |
 | CLI Flag Secrets | `-p 'Password1'` | `-p 'SECRET_01'` | 16 |
 | Slash Param Secrets | `/user:admin /rc4:hash` | `/user:SECRET_01 /rc4:SECRET_02` | 16 |
-| SMB User%Pass | `-U admin%P@ss` | `-U SECRET_01` | 16 |
+| SMB User%Pass | `-U admin%P@ss` | `-U SECRET_01%SECRET_02` | 16 |
 | Windows SID | `S-1-5-21-384293...` | `SID_REDACTED_01` | 18 |
 | SSN | `123-45-6789` | `SSN_REDACTED_01` | 20 |
 | Credit Card | `4111111111111111` | `CC_REDACTED_01` | 20 |
@@ -166,9 +170,9 @@ mac = false           # disable globally
 
 [custom]
 values = ["ACME Corp", "Project Nighthawk"]          # case-sensitive
-values_nocase = ["jsmith", "proddb"]                  # case-insensitive
-target_domains = ["contoso.com", "acmecorp.org"]      # auto-generates hostname rules
-allowlist = ["scanme.nmap.org"]                        # pass through unredacted
+values_nocase = ["jsmith", "proddb"]                 # case-insensitive, one placeholder across case variants
+target_domains = ["contoso.com", "acmecorp.org"]     # case-insensitive bare domain + subdomains
+allowlist = ["scanme.nmap.org"]                      # pass through unredacted
 
 [[custom.patterns]]
 name = "internal_domains"
@@ -186,6 +190,9 @@ mac = false
 
 Resolution order: global `[rules]` -> profile overrides -> CLI `--enable`/`--disable`.
 
+Invalid TOML or broken custom regex patterns are reported as clean CLI errors
+instead of Python tracebacks.
+
 ```bash
 decon -p client-share report.txt    # use a specific profile
 DECON_PROFILE=client-share decon report.txt   # or via env var
@@ -202,7 +209,7 @@ The built-in hostname rule only catches internal TLDs (`.corp`, `.internal`, `.l
 target_domains = ["contoso.com", "acmecorp.org"]
 ```
 
-This matches `contoso.com`, `dc01.contoso.com`, `mail.internal.contoso.com`, etc. — all mapped to `HOST_XX.example.internal` placeholders.
+This matches `contoso.com`, `dc01.contoso.com`, `mail.internal.contoso.com`, etc. — all mapped to `HOST_XX.example.internal` placeholders. Matching is case-insensitive, so `MAIL.CONTOSO.COM` is caught too.
 
 ### Allowlist
 
@@ -233,13 +240,20 @@ decon --import-map map.json --export-map map.json scan3.txt > clean3.txt
 
 The mapping file is JSON — `10.4.12.50` maps to `10.0.0.1` in every file.
 
+`--check` and `--dry-run` work correctly with imported mappings too — if an
+imported map causes a value to be replaced, DECON reports it even when no new
+mapping entry had to be created.
+
 ### Batch Mode
 
 Process multiple files at once, writing each to an output directory with a shared mapping:
 
 ```bash
 decon *.txt --output-dir clean/
-# creates clean/scan1.redacted.txt, clean/scan2.redacted.txt, etc.
+# creates clean/<path relative to the inputs' common parent>/*.redacted.txt
+# example:
+#   reports/web/scan.txt  -> clean/web/scan.redacted.txt
+#   reports/ad/scan.txt   -> clean/ad/scan.redacted.txt
 
 # With cross-file mapping export
 decon *.txt --output-dir clean/ --export-map map.json
@@ -276,6 +290,9 @@ Found 5 value(s) to redact:
   ipv4: 3
   secret: 1
 ```
+
+The count is based on values DECON would actually replace in that run,
+including replacements resolved via `--import-map`.
 
 ## Diff Mode
 
@@ -573,13 +590,13 @@ decon [OPTIONS] [FILE...]
 
 Input:
   FILE...               Files to redact (default: stdin)
-  --tmux                Capture active tmux pane scrollback
-  --clipboard-in        Read from system clipboard
+  --tmux                Capture active tmux pane scrollback (exit 1 if unavailable)
+  --clipboard-in        Read from system clipboard (exit 1 if unavailable)
 
 Output:
   -c, --clipboard       Copy to clipboard
   -o, --output FILE     Write to file
-  --output-dir DIR      Write redacted files to directory (one per input file)
+  --output-dir DIR      Write redacted files to directory, preserving relative paths
   (default)             stdout
 
 Rules:

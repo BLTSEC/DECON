@@ -17,11 +17,12 @@ host = "http://localhost:11434"
 
 [custom]
 values = ["ACME Corp", "Project Nighthawk"]          # case-sensitive
-values_nocase = ["jsmith", "proddb"]                  # case-insensitive
-target_domains = ["contoso.com", "acmecorp.org"]      # auto-generates hostname rules
-allowlist = ["scanme.nmap.org"]                        # pass through unredacted
+values_nocase = ["jsmith", "proddb"]                 # case-insensitive, one placeholder across case variants
+target_domains = ["contoso.com", "acmecorp.org"]     # case-insensitive bare domain + subdomains
+allowlist = ["scanme.nmap.org"]                      # pass through unredacted
 
 [[custom.patterns]]
+# Must be valid TOML + valid Python regex; DECON reports config errors cleanly.
 name = "internal_domains"
 pattern = '[a-z0-9-]+\.corp\.acme\.com'
 replacement = "HOST_{n:02d}.example.internal"

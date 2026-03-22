@@ -4,7 +4,12 @@ import tempfile
 import os
 from pathlib import Path
 
-from decon.config import load_config, resolve_profile, apply_config_to_engine
+from decon.config import (
+    ConfigError,
+    apply_config_to_engine,
+    load_config,
+    resolve_profile,
+)
 from decon.engine import RedactionEngine
 
 
@@ -23,6 +28,21 @@ class TestLoadConfig:
             config = load_config(Path(path))
             assert config["rules"]["ipv4"] is False
             assert config["llm"]["enabled"] is True
+        finally:
+            os.unlink(path)
+
+    def test_invalid_toml_raises_config_error(self):
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".toml", delete=False
+        ) as f:
+            f.write("[rules\nipv4 = true\n")
+            path = f.name
+        try:
+            try:
+                load_config(Path(path))
+                assert False, "Expected ConfigError"
+            except ConfigError:
+                pass
         finally:
             os.unlink(path)
 
@@ -77,3 +97,21 @@ class TestApplyConfig:
 
         result = engine.redact("connect to db.test.local")
         assert "db.test.local" not in result
+
+    def test_invalid_custom_pattern_raises_config_error(self):
+        config = {
+            "custom": {
+                "patterns": [
+                    {
+                        "name": "broken",
+                        "pattern": r"[unterminated",
+                    }
+                ]
+            }
+        }
+        engine = RedactionEngine()
+        try:
+            apply_config_to_engine(engine, config)
+            assert False, "Expected ConfigError"
+        except ConfigError:
+            pass
