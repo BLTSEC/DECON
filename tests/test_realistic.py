@@ -114,7 +114,8 @@ Nmap done: 256 IP addresses (2 hosts up) scanned in 43.21 seconds
         text = "rDNS record for 10.1.10.22: CASTELBLACK"
         result = _engine().redact(text)
         _assert_clean(result, "10.1.10.22", "CASTELBLACK")
-        assert "HOST_" in result
+        assert "HOST_01" in result
+        assert ".example.internal" not in result
 
     def test_hostname_placeholders_follow_textual_order(self):
         text = """\
@@ -129,8 +130,8 @@ rDNS record for 10.1.10.11: WINTERFELL
         assert "Command: nmap -Pn -sT -sV -p 389,445,1433 HOST_01.example.internal HOST_02.example.internal" in result
         assert "Nmap scan report for HOST_01.example.internal (10.0.0.1)" in result
         assert "Nmap scan report for HOST_02.example.internal (10.0.0.2)" in result
-        assert "rDNS record for 10.0.0.1: HOST_01.example.internal" in result
-        assert "rDNS record for 10.0.0.2: HOST_02.example.internal" in result
+        assert "rDNS record for 10.0.0.1: HOST_01" in result
+        assert "rDNS record for 10.0.0.2: HOST_02" in result
         assert "(Domain: HOST_03.example.internal0., Site: Default-First-Site-Name)" in result
 
 

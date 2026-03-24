@@ -40,6 +40,25 @@ class TestCLIBasic:
         assert "10.4.12.50" in captured.err
         assert "10.0.0.1" in captured.err
 
+    def test_dry_run_shows_short_rdns_alias_with_matching_host_index(
+        self, monkeypatch, capsys
+    ):
+        monkeypatch.setattr(
+            "sys.stdin",
+            StringIO(
+                "Nmap scan report for castelblack.north.sevenkingdoms.local (10.1.10.22)\n"
+                "rDNS record for 10.1.10.22: CASTELBLACK\n"
+            ),
+        )
+        ret = main(["--dry-run"])
+        assert ret == 0
+        captured = capsys.readouterr()
+        assert (
+            "castelblack.north.sevenkingdoms.local -> HOST_01.example.internal"
+            in captured.err
+        )
+        assert "CASTELBLACK -> HOST_01" in captured.err
+
     def test_disable_flag(self, monkeypatch, capsys):
         monkeypatch.setattr("sys.stdin", StringIO("10.4.12.50\n"))
         ret = main(["--disable", "ipv4"])

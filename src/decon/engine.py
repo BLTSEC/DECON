@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from decon.patterns import Rule, build_default_rules
 
 AppliedRedaction = tuple[str, str, str]
-_HOST_PLACEHOLDER = re.compile(r"HOST_(\d{2})\.example\.internal")
+_HOST_PLACEHOLDER = re.compile(r"HOST_(\d{2})(?:\.example\.internal)?")
 
 
 @dataclass
@@ -191,6 +191,22 @@ class RedactionEngine:
         self.rules.append(rule)
         self.rules.sort(key=lambda r: r.priority)
 
+    @staticmethod
+    def _remap_hostname_placeholder(
+        value: str,
+        remap_ids: dict[int, int],
+    ) -> str:
+        """Remap a hostname placeholder while preserving short/full style."""
+        match = _HOST_PLACEHOLDER.fullmatch(value)
+        if not match:
+            return value
+
+        old_id = int(match.group(1))
+        new_id = remap_ids.get(old_id, old_id)
+        if value.endswith(".example.internal"):
+            return f"HOST_{new_id:02d}.example.internal"
+        return f"HOST_{new_id:02d}"
+
     def _normalize_hostname_placeholders(
         self,
         text: str,
@@ -201,35 +217,42 @@ class RedactionEngine:
         This runs only when the engine had no preexisting hostname placeholders,
         so it preserves cross-document consistency for imported/shared mappings.
         """
-        ordered: list[str] = []
-        seen: set[str] = set()
+        ordered_ids: list[int] = []
+        seen_ids: set[int] = set()
         for match in _HOST_PLACEHOLDER.finditer(text):
-            placeholder = match.group(0)
-            if placeholder in seen:
+            placeholder_id = int(match.group(1))
+            if placeholder_id in seen_ids:
                 continue
-            seen.add(placeholder)
-            ordered.append(placeholder)
+            seen_ids.add(placeholder_id)
+            ordered_ids.append(placeholder_id)
 
-        remap = {
-            old: f"HOST_{index:02d}.example.internal"
-            for index, old in enumerate(ordered, start=1)
-            if old != f"HOST_{index:02d}.example.internal"
+        remap_ids = {
+            old_id: index
+            for index, old_id in enumerate(ordered_ids, start=1)
+            if old_id != index
         }
-        if not remap:
-            self.counters["hostname"] = max(self.counters.get("hostname", 0), len(ordered))
+        if not remap_ids:
+            self.counters["hostname"] = max(self.counters.get("hostname", 0), len(ordered_ids))
             return text, applied
 
-        text = _HOST_PLACEHOLDER.sub(lambda m: remap.get(m.group(0), m.group(0)), text)
+        text = _HOST_PLACEHOLDER.sub(
+            lambda m: self._remap_hostname_placeholder(m.group(0), remap_ids),
+            text,
+        )
         self.mapping = {
-            key: remap.get(value, value)
+            key: self._remap_hostname_placeholder(value, remap_ids)
             for key, value in self.mapping.items()
         }
-        self.counters["hostname"] = len(ordered)
+        self.counters["hostname"] = len(ordered_ids)
         applied = [
             (
                 category,
                 value,
-                remap.get(placeholder, placeholder) if category == "hostname" else placeholder,
+                (
+                    self._remap_hostname_placeholder(placeholder, remap_ids)
+                    if category == "hostname"
+                    else placeholder
+                ),
             )
             for category, value, placeholder in applied
         ]
