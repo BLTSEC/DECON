@@ -153,6 +153,31 @@ def _assign_placeholder(
     return placeholder
 
 
+def _assign_domain_placeholder(
+    value: str,
+    mapping: dict[str, str],
+    counters: dict[str, int],
+    placeholder_values: set[str],
+    applied: list[tuple[str, str, str]] | None = None,
+    mapping_key: str | None = None,
+) -> str:
+    """Return a stable parent-domain-style placeholder for FQDN domain values."""
+    mapping_key = value if mapping_key is None else mapping_key
+
+    if mapping_key in mapping:
+        placeholder = mapping[mapping_key]
+    else:
+        n = counters.get("domain", 0) + 1
+        counters["domain"] = n
+        placeholder = "example.internal" if n == 1 else f"example{n:02d}.internal"
+        mapping[mapping_key] = placeholder
+        placeholder_values.add(placeholder)
+
+    if applied is not None:
+        applied.append(("domain", value, placeholder))
+    return placeholder
+
+
 def _cidr_apply(
     rule: Rule,
     text: str,
@@ -196,7 +221,7 @@ def _domain_context_apply(
     counters: dict[str, int],
     applied: list[tuple[str, str, str]] | None = None,
 ) -> str:
-    """Apply Domain:/domain= redaction with hostname placeholders for FQDNs."""
+    """Apply Domain:/domain= redaction with domain-style placeholders for FQDNs."""
     placeholder_values = set(mapping.values())
 
     def _replace(match: re.Match[str]) -> str:
@@ -206,24 +231,25 @@ def _domain_context_apply(
 
         normalized, suffix = _split_domain_context_value(value)
         if _looks_like_fqdn(normalized):
-            category = "hostname"
-            template = "HOST_{n:02d}.example.internal"
-            mapping_key = normalized
+            placeholder = _assign_domain_placeholder(
+                value=value,
+                mapping=mapping,
+                counters=counters,
+                placeholder_values=placeholder_values,
+                applied=applied,
+                mapping_key=normalized.casefold(),
+            )
         else:
-            category = rule.category
-            template = rule.placeholder_template
-            mapping_key = value
-
-        placeholder = _assign_placeholder(
-            category=category,
-            template=template,
-            value=value,
-            mapping=mapping,
-            counters=counters,
-            placeholder_values=placeholder_values,
-            applied=applied,
-            mapping_key=mapping_key,
-        )
+            placeholder = _assign_placeholder(
+                category=rule.category,
+                template=rule.placeholder_template,
+                value=value,
+                mapping=mapping,
+                counters=counters,
+                placeholder_values=placeholder_values,
+                applied=applied,
+                mapping_key=value,
+            )
         full = match.group(0)
         start = full[: match.start(2) - match.start(0)]
         end = full[match.end(2) - match.start(0) :]

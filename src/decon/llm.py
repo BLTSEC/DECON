@@ -35,6 +35,8 @@ def _build_placeholder_re() -> re.Pattern[str]:
 
     # Also match custom value placeholders (from add_custom_values)
     fragments.append(r"REDACTED_\d+")
+    # Domain-context FQDN placeholders are parent-domain style.
+    fragments.append(r"example(?:\d+)?\.internal")
 
     return re.compile(r"^(?:" + "|".join(fragments) + r")$")
 
@@ -44,7 +46,7 @@ _PLACEHOLDER_RE = _build_placeholder_re()
 
 REVIEW_PROMPT = """\
 This is redacted pentest output. Placeholders (10.0.0.X, fd00::X, \
-user_XX@example.com, HOST_XX.example.internal, SECRET_XX, \
+user_XX@example.com, HOST_XX.example.internal, HOST_XX, example.internal, SECRET_XX, \
 URL_REDACTED_XX, NTLM_HASH_XX, NTLMV2_HASH_XX, SAM_DUMP_XX, \
 KERBEROS_KEY_XX, KERBEROS_HASH_XX, DCC2_HASH_XX, DPAPI_KEY_XX, \
 SID_REDACTED_XX, DOMAIN_USER_XX, UNC_PATH_XX, \

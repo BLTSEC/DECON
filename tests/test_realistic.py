@@ -98,16 +98,14 @@ Nmap done: 256 IP addresses (2 hosts up) scanned in 43.21 seconds
         assert "PORT" in result
         assert "STATE" in result
 
-    def test_ldap_domain_banner_uses_hostname_placeholder(self):
+    def test_ldap_domain_banner_uses_parent_domain_placeholder(self):
         text = (
             "389/tcp  open ldap Microsoft Windows Active Directory LDAP "
             "(Domain: sevenkingdoms.local0., Site: Default-First-Site-Name)"
         )
         result = _engine().redact(text)
         _assert_clean(result, "sevenkingdoms.local0.,")
-        assert "HOST_" in result
-        assert "(Domain: HOST_" in result
-        assert "example.internal0.," in result
+        assert "(Domain: example.internal0.," in result
         assert ", Site: Default-First-Site-Name)" in result
 
     def test_rdns_single_label_hostname_redacted(self):
@@ -132,7 +130,7 @@ rDNS record for 10.1.10.11: WINTERFELL
         assert "Nmap scan report for HOST_02.example.internal (10.0.0.2)" in result
         assert "rDNS record for 10.0.0.1: HOST_01" in result
         assert "rDNS record for 10.0.0.2: HOST_02" in result
-        assert "(Domain: HOST_03.example.internal0., Site: Default-First-Site-Name)" in result
+        assert "(Domain: example.internal0., Site: Default-First-Site-Name)" in result
 
 
 class TestNetexecOutput:
