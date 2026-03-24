@@ -205,6 +205,7 @@ def _domain_context_apply(
             return match.group(0)
 
         normalized = _normalize_domain_context_value(value)
+        suffix = re.sub(r"^\.+", "", value[len(value.rstrip(".,;:!?)]}")) :])
         if _looks_like_fqdn(normalized):
             category = "hostname"
             template = "HOST_{n:02d}.example.internal"
@@ -227,7 +228,7 @@ def _domain_context_apply(
         full = match.group(0)
         start = full[: match.start(2) - match.start(0)]
         end = full[match.end(2) - match.start(0) :]
-        return start + placeholder + end
+        return start + placeholder + suffix + end
 
     return rule.pattern.sub(_replace, text)
 
@@ -516,6 +517,38 @@ def _looks_like_fqdn(value: str) -> bool:
     return bool(_FQDN_LIKE.fullmatch(value))
 
 
+def _rdns_hostname_apply(
+    rule: Rule,
+    text: str,
+    mapping: dict[str, str],
+    counters: dict[str, int],
+    applied: list[tuple[str, str, str]] | None = None,
+) -> str:
+    """Redact single-label reverse-DNS hostnames with hostname placeholders."""
+    placeholder_values = set(mapping.values())
+
+    def _replace(match: re.Match[str]) -> str:
+        value = match.group(2)
+        if value in placeholder_values:
+            return match.group(0)
+        placeholder = _assign_placeholder(
+            category=rule.category,
+            template=rule.placeholder_template,
+            value=value,
+            mapping=mapping,
+            counters=counters,
+            placeholder_values=placeholder_values,
+            applied=applied,
+            mapping_key=value.casefold(),
+        )
+        full = match.group(0)
+        start = full[: match.start(2) - match.start(0)]
+        end = full[match.end(2) - match.start(0) :]
+        return start + placeholder + end
+
+    return rule.pattern.sub(_replace, text)
+
+
 # ---------------------------------------------------------------------------
 # Compiled regex patterns
 # ---------------------------------------------------------------------------
@@ -611,6 +644,13 @@ _DOMAIN_CONTEXT = re.compile(
     r"(?:domain)"
     r"(?:\s*[:=]\s*)"
     r"(['\"]?)([^\s'\"]{4,})\1"
+)
+
+_RDNS_SINGLE_LABEL = re.compile(
+    r"(?im)"
+    r"(rDNS record for [^:\n]+:\s+)"
+    r"([A-Z][A-Z0-9-]{1,62})"
+    r"(?=\s|$)"
 )
 
 _CLI_FLAG_SECRET = re.compile(
@@ -974,6 +1014,14 @@ def build_default_rules() -> list[Rule]:
             priority=40,
             pattern=_MAC,
             placeholder_template="00:DE:AD:00:00:{n:02X}",
+        ),
+        Rule(
+            name="rdns_single_label",
+            category="hostname",
+            priority=44,
+            pattern=_RDNS_SINGLE_LABEL,
+            placeholder_template="HOST_{n:02d}.example.internal",
+            apply_fn=_rdns_hostname_apply,
         ),
         Rule(
             name="hostname_internal",
