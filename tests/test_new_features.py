@@ -774,6 +774,24 @@ class TestLLMPostFilterArtifacts:
         raw = "FOUND: 2024-09-09T16:04:31"
         assert _filter_placeholder_findings(raw) == "CLEAN"
 
+    def test_timestamp_with_timezone_and_year_filtered(self):
+        from decon.llm import _filter_placeholder_findings
+
+        raw = "FOUND: 14:28:13 CDT 2026"
+        assert _filter_placeholder_findings(raw) == "CLEAN"
+
+    def test_ctime_style_timestamp_filtered(self):
+        from decon.llm import _filter_placeholder_findings
+
+        raw = "FOUND: Tue Mar 24 14:28:13 CDT 2026"
+        assert _filter_placeholder_findings(raw) == "CLEAN"
+
+    def test_duration_seconds_filtered(self):
+        from decon.llm import _filter_placeholder_findings
+
+        raw = "FOUND: 3.15 seconds"
+        assert _filter_placeholder_findings(raw) == "CLEAN"
+
     def test_wordlist_filename_filtered(self):
         from decon.llm import _filter_placeholder_findings
 
