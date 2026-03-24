@@ -672,6 +672,7 @@ class TestLLMTruncation:
             "UNC_PATH_01",
             "PRIVATE_KEY_REDACTED_01",
             "REDACTED_01",
+            "example.internal0",
         ]
         for p in new_placeholders:
             assert _PLACEHOLDER_RE.match(p), f"Placeholder not matched: {p}"
@@ -743,6 +744,7 @@ class TestLLMPostFilterNormalization:
         assert _normalize_finding("https://10.0.0.3/path") == "10.0.0.3"
         assert _normalize_finding("OpenSSH (in banner)") == "OpenSSH"
         assert _normalize_finding("basic-auth-user") == "basic-auth-user"
+        assert _normalize_finding("example.internal0.") == "example.internal0"
 
 
 class TestLLMPostFilterArtifacts:
@@ -803,6 +805,18 @@ class TestLLMPostFilterArtifacts:
         result = _filter_placeholder_findings(raw)
         assert "admin@corp.local" in result
         assert "2023-200_most_used_passwords.txt" not in result
+
+    def test_nmap_boilerplate_urls_filtered(self):
+        from decon.llm import _filter_placeholder_findings
+
+        raw = "FOUND: https://nmap.org\nFOUND: https://nmap.org/submit/"
+        assert _filter_placeholder_findings(raw) == "CLEAN"
+
+    def test_suffixed_parent_domain_placeholder_filtered(self):
+        from decon.llm import _filter_placeholder_findings
+
+        raw = "FOUND: example.internal0."
+        assert _filter_placeholder_findings(raw) == "CLEAN"
 
 
 # ---------------------------------------------------------------------------
