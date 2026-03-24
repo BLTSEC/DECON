@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from decon.patterns import Rule, build_default_rules
 
 AppliedRedaction = tuple[str, str, str]
+_HOST_PLACEHOLDER = re.compile(r"HOST_(\d{2})\.example\.internal")
 
 
 @dataclass
@@ -53,11 +54,18 @@ class RedactionEngine:
 
     def redact_with_report(self, text: str) -> RedactionReport:
         """Redact text and return details about replacements applied."""
+        existing_hostname_placeholders = {
+            value
+            for value in self.mapping.values()
+            if _HOST_PLACEHOLDER.fullmatch(value)
+        }
         applied: list[AppliedRedaction] = []
         for rule in self.rules:
             if not rule.enabled:
                 continue
             text = rule.apply(text, self.mapping, self.counters, applied)
+        if not existing_hostname_placeholders:
+            text, applied = self._normalize_hostname_placeholders(text, applied)
         return RedactionReport(text=text, applied=applied)
 
     def unredact(self, text: str) -> str:
@@ -182,3 +190,47 @@ class RedactionEngine:
         """Add a rule and keep rule order stable by priority."""
         self.rules.append(rule)
         self.rules.sort(key=lambda r: r.priority)
+
+    def _normalize_hostname_placeholders(
+        self,
+        text: str,
+        applied: list[AppliedRedaction],
+    ) -> tuple[str, list[AppliedRedaction]]:
+        """Renumber hostname placeholders by first textual appearance.
+
+        This runs only when the engine had no preexisting hostname placeholders,
+        so it preserves cross-document consistency for imported/shared mappings.
+        """
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for match in _HOST_PLACEHOLDER.finditer(text):
+            placeholder = match.group(0)
+            if placeholder in seen:
+                continue
+            seen.add(placeholder)
+            ordered.append(placeholder)
+
+        remap = {
+            old: f"HOST_{index:02d}.example.internal"
+            for index, old in enumerate(ordered, start=1)
+            if old != f"HOST_{index:02d}.example.internal"
+        }
+        if not remap:
+            self.counters["hostname"] = max(self.counters.get("hostname", 0), len(ordered))
+            return text, applied
+
+        text = _HOST_PLACEHOLDER.sub(lambda m: remap.get(m.group(0), m.group(0)), text)
+        self.mapping = {
+            key: remap.get(value, value)
+            for key, value in self.mapping.items()
+        }
+        self.counters["hostname"] = len(ordered)
+        applied = [
+            (
+                category,
+                value,
+                remap.get(placeholder, placeholder) if category == "hostname" else placeholder,
+            )
+            for category, value, placeholder in applied
+        ]
+        return text, applied
