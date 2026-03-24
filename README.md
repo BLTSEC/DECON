@@ -111,9 +111,9 @@ Rules are applied in priority order to prevent partial matches (e.g., JWTs are m
 
 Loopback and special addresses (`127.0.0.1`, `0.0.0.0`, `255.255.255.255`, `169.254.x.x`) pass through unredacted — they're never target infrastructure.
 
-URLs pointing to public code hosting and security reference sites (`github.com`, `gitlab.com`, `exploit-db.com`, `attack.mitre.org`, etc.) also pass through. Sensitive values within them (org names, repo names) are still caught by custom value rules.
+URLs pointing to public code hosting and security reference sites (`github.com`, `gitlab.com`, `exploit-db.com`, `attack.mitre.org`, etc.) also pass through. Standard Nmap boilerplate URLs (`https://nmap.org` in the banner and `https://nmap.org/submit/` in the service-detection footer) also pass through. Sensitive values within URLs are still caught by custom value rules when relevant.
 
-Context-anchored secrets (priority 15) preserve the label and only redact the value — `password=Hunter2` becomes `password=SECRET_01`, so the LLM knows a password was there without seeing the actual credential. CLI flag secrets (priority 16) catch `-p`, `-P`, `-H`, `--password`, `--hash`, `-u`, `-l`, `--user`, `--login` flags common in hydra, netexec, evil-winrm commands. Rubeus/Mimikatz `/param:value` style (`/user:`, `/rc4:`, `/ntlm:`, `/aes256:`, `/password:`, `/domain:`) and smbclient `-U user%password` format are also matched.
+Context-anchored secrets (priority 15) preserve the label and only redact the value — `password=Hunter2` becomes `password=SECRET_01`, so the LLM knows a password was there without seeing the actual credential. `Domain:` / `domain=` values are handled specially: FQDN-like values are redacted with hostname placeholders, while non-FQDN domain names still use `SECRET_XX`. CLI flag secrets (priority 16) catch `-p`, `-P`, `-H`, `--password`, `--hash`, `-u`, `-l`, `--user`, `--login` flags common in hydra, netexec, evil-winrm commands. For Nmap-style scan commands, `-p 80,443,8443` port lists/ranges are preserved instead of being treated as secrets. Rubeus/Mimikatz `/param:value` style (`/user:`, `/rc4:`, `/ntlm:`, `/aes256:`, `/password:`, `/domain:`) and smbclient `-U user%password` format are also matched.
 
 AD domain\user patterns skip Windows built-in identities (`NT AUTHORITY\SYSTEM`, `BUILTIN\Administrators`, `NT SERVICE\...`) and registry paths (`HKLM\...`, `HKEY_...`, `SOFTWARE\...`, `Microsoft\...`) to avoid false positives.
 
@@ -127,7 +127,9 @@ Kerberoast (`$krb5tgs$`) and AS-REP (`$krb5asrep$`) hashes, DCC2 cached credenti
 
 AD domain\user patterns match both backslash (Windows) and forward-slash (Impacket) notation. Uppercase short domains (`CORP\jsmith`) and FQDN domains (`megacorp.local\svc_bes`). When credentials follow the username, the password is captured too.
 
-Internal hostnames match `.corp`, `.local`, `.internal`, `.intra`, `.priv`, `.lan`, `.htb`, and `.lab` TLDs — covering both real engagement and CTF/lab environments.
+Internal hostnames match `.corp`, `.local`, `.internal`, `.intra`, `.priv`, `.lan`, `.htb`, and `.lab` TLDs — covering both real engagement and CTF/lab environments. Single-label reverse-DNS names in Nmap output (`rDNS record for ...: CASTELBLACK`) are also redacted as hostnames.
+
+For fresh runs, hostname placeholders are normalized by first textual appearance in the final redacted output (`HOST_01`, `HOST_02`, ...), which makes Nmap and mixed log output easier to read. Imported hostname mappings still preserve their existing numbering for cross-file consistency.
 
 CIDR notation preserves the original subnet mask — `10.0.0.0/16` becomes `10.0.0.1/16`, not `/24`.
 
