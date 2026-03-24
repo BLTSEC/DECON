@@ -502,7 +502,7 @@ def _valid_domain_user(value: str) -> bool:
 _FQDN_LIKE = re.compile(
     r"(?i)^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
 )
-_HOST_PLACEHOLDER = re.compile(r"HOST_\d{2}\.example\.internal")
+_HOST_PLACEHOLDER = re.compile(r"HOST_\d{2}(?:\.example\.internal)?")
 
 
 def _normalize_domain_context_value(value: str) -> str:
@@ -545,6 +545,13 @@ def _hostname_first_label(value: str) -> str | None:
     return label.casefold() if label else None
 
 
+def _short_hostname_placeholder(value: str) -> str:
+    """Return the short HOST_XX form for a hostname placeholder."""
+    if value.endswith(".example.internal"):
+        return value.split(".", 1)[0]
+    return value
+
+
 def _find_hostname_alias_placeholder(value: str, mapping: dict[str, str]) -> str | None:
     """Reuse an existing hostname placeholder when a single-label alias is unique."""
     label = value.casefold()
@@ -575,6 +582,9 @@ def _rdns_hostname_apply(
             return match.group(0)
         placeholder = _find_hostname_alias_placeholder(value, mapping)
         if placeholder is not None:
+            placeholder = _short_hostname_placeholder(placeholder)
+            mapping[value.casefold()] = placeholder
+            placeholder_values.add(placeholder)
             if applied is not None:
                 applied.append((rule.category, value, placeholder))
             full = match.group(0)
@@ -1077,7 +1087,7 @@ def build_default_rules() -> list[Rule]:
             category="hostname",
             priority=45,
             pattern=_RDNS_SINGLE_LABEL,
-            placeholder_template="HOST_{n:02d}.example.internal",
+            placeholder_template="HOST_{n:02d}",
             apply_fn=_rdns_hostname_apply,
         ),
     ]
