@@ -999,6 +999,16 @@ class TestCLIFlagSecrets:
         result = RedactionEngine().redact("evil-winrm -pw weasal123 -i 10.1.1.1")
         assert "weasal123" not in result
 
+    def test_nmap_p_flag_port_list_not_secret(self):
+        result = RedactionEngine().redact("nmap -Pn -sV -p 389,445,1433 10.1.1.1")
+        assert "389,445,1433" in result
+        assert "10.1.1.1" not in result
+
+    def test_numeric_password_still_redacted_outside_port_scan_tools(self):
+        result = RedactionEngine().redact("hydra -l admin -p 12345678 10.1.1.1")
+        assert "12345678" not in result
+        assert "SECRET_" in result
+
 
 # ---------------------------------------------------------------------------
 # New rules: Kerberoast/AS-REP hashes
