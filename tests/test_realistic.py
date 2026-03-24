@@ -106,6 +106,14 @@ Nmap done: 256 IP addresses (2 hosts up) scanned in 43.21 seconds
         result = _engine().redact(text)
         _assert_clean(result, "sevenkingdoms.local0.,")
         assert "HOST_" in result
+        assert "(Domain: HOST_" in result
+        assert ", Site: Default-First-Site-Name)" in result
+
+    def test_rdns_single_label_hostname_redacted(self):
+        text = "rDNS record for 10.1.10.22: CASTELBLACK"
+        result = _engine().redact(text)
+        _assert_clean(result, "10.1.10.22", "CASTELBLACK")
+        assert "HOST_" in result
 
 
 class TestNetexecOutput:
