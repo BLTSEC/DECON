@@ -1130,6 +1130,11 @@ class TestExpandedContextSecrets:
         result = RedactionEngine().redact("Domain: INLANEFREIGHT")
         assert "INLANEFREIGHT" not in result
 
+    def test_domain_fqdn_uses_hostname_placeholder(self):
+        result = RedactionEngine().redact("Domain: sevenkingdoms.local")
+        assert "sevenkingdoms.local" not in result
+        assert "HOST_" in result
+
     def test_ntlm_keyword(self):
         result = RedactionEngine().redact("NTLM: 64f12cddaa88057e06a81b54e73b949b")
         assert "64f12cdd" not in result
