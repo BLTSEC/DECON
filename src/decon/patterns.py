@@ -204,8 +204,7 @@ def _domain_context_apply(
         if value in placeholder_values:
             return match.group(0)
 
-        normalized = _normalize_domain_context_value(value)
-        suffix = re.sub(r"^\.+", "", value[len(value.rstrip(".,;:!?)]}")) :])
+        normalized, suffix = _split_domain_context_value(value)
         if _looks_like_fqdn(normalized):
             category = "hostname"
             template = "HOST_{n:02d}.example.internal"
@@ -503,6 +502,7 @@ def _valid_domain_user(value: str) -> bool:
 _FQDN_LIKE = re.compile(
     r"(?i)^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
 )
+_HOST_PLACEHOLDER = re.compile(r"HOST_\d{2}\.example\.internal")
 
 
 def _normalize_domain_context_value(value: str) -> str:
@@ -512,9 +512,51 @@ def _normalize_domain_context_value(value: str) -> str:
     return normalized.rstrip(".")
 
 
+def _split_domain_context_value(value: str) -> tuple[str, str]:
+    """Return a normalized Domain: value plus any stripped suffix to preserve."""
+    trimmed = value.rstrip(".,;:!?)]}")
+    trailing = value[len(trimmed):]
+    trimmed_no_dot = trimmed.rstrip(".")
+
+    match = re.fullmatch(
+        r"(?i)"
+        r"((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63})"
+        r"(\d*)",
+        trimmed_no_dot,
+    )
+    if match:
+        normalized = match.group(1)
+        suffix = trimmed_no_dot[len(normalized):] + trimmed[len(trimmed_no_dot):] + trailing
+        return normalized, suffix
+
+    return _normalize_domain_context_value(value), trailing
+
+
 def _looks_like_fqdn(value: str) -> bool:
     """Return True if the value looks like a fully-qualified domain name."""
     return bool(_FQDN_LIKE.fullmatch(value))
+
+
+def _hostname_first_label(value: str) -> str | None:
+    """Return the lowercase first label for a hostname-like value."""
+    if "." not in value:
+        return None
+    label = value.split(".", 1)[0]
+    return label.casefold() if label else None
+
+
+def _find_hostname_alias_placeholder(value: str, mapping: dict[str, str]) -> str | None:
+    """Reuse an existing hostname placeholder when a single-label alias is unique."""
+    label = value.casefold()
+    matches = {
+        placeholder
+        for key, placeholder in mapping.items()
+        if _HOST_PLACEHOLDER.fullmatch(placeholder)
+        and _hostname_first_label(key) == label
+    }
+    if len(matches) == 1:
+        return next(iter(matches))
+    return None
 
 
 def _rdns_hostname_apply(
@@ -531,6 +573,14 @@ def _rdns_hostname_apply(
         value = match.group(2)
         if value in placeholder_values:
             return match.group(0)
+        placeholder = _find_hostname_alias_placeholder(value, mapping)
+        if placeholder is not None:
+            if applied is not None:
+                applied.append((rule.category, value, placeholder))
+            full = match.group(0)
+            start = full[: match.start(2) - match.start(0)]
+            end = full[match.end(2) - match.start(0) :]
+            return start + placeholder + end
         placeholder = _assign_placeholder(
             category=rule.category,
             template=rule.placeholder_template,
@@ -1016,19 +1066,19 @@ def build_default_rules() -> list[Rule]:
             placeholder_template="00:DE:AD:00:00:{n:02X}",
         ),
         Rule(
-            name="rdns_single_label",
+            name="hostname_internal",
             category="hostname",
             priority=44,
+            pattern=_HOSTNAME_INTERNAL,
+            placeholder_template="HOST_{n:02d}.example.internal",
+        ),
+        Rule(
+            name="rdns_single_label",
+            category="hostname",
+            priority=45,
             pattern=_RDNS_SINGLE_LABEL,
             placeholder_template="HOST_{n:02d}.example.internal",
             apply_fn=_rdns_hostname_apply,
-        ),
-        Rule(
-            name="hostname_internal",
-            category="hostname",
-            priority=45,
-            pattern=_HOSTNAME_INTERNAL,
-            placeholder_template="HOST_{n:02d}.example.internal",
         ),
     ]
 
