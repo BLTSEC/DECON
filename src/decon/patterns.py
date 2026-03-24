@@ -126,6 +126,33 @@ def _group_replace_apply(
     return rule.pattern.sub(_replace, text)
 
 
+def _assign_placeholder(
+    category: str,
+    template: str,
+    value: str,
+    mapping: dict[str, str],
+    counters: dict[str, int],
+    placeholder_values: set[str],
+    applied: list[tuple[str, str, str]] | None = None,
+    mapping_key: str | None = None,
+) -> str:
+    """Return a stable placeholder for a value, creating it if needed."""
+    mapping_key = value if mapping_key is None else mapping_key
+
+    if mapping_key in mapping:
+        placeholder = mapping[mapping_key]
+    else:
+        n = counters.get(category, 0) + 1
+        counters[category] = n
+        placeholder = template.format(n=n)
+        mapping[mapping_key] = placeholder
+        placeholder_values.add(placeholder)
+
+    if applied is not None:
+        applied.append((category, value, placeholder))
+    return placeholder
+
+
 def _cidr_apply(
     rule: Rule,
     text: str,
@@ -158,6 +185,49 @@ def _cidr_apply(
         if applied is not None:
             applied.append((rule.category, value, placeholder))
         return placeholder
+
+    return rule.pattern.sub(_replace, text)
+
+
+def _domain_context_apply(
+    rule: Rule,
+    text: str,
+    mapping: dict[str, str],
+    counters: dict[str, int],
+    applied: list[tuple[str, str, str]] | None = None,
+) -> str:
+    """Apply Domain:/domain= redaction with hostname placeholders for FQDNs."""
+    placeholder_values = set(mapping.values())
+
+    def _replace(match: re.Match[str]) -> str:
+        value = match.group(2)
+        if value in placeholder_values:
+            return match.group(0)
+
+        normalized = _normalize_domain_context_value(value)
+        if _looks_like_fqdn(normalized):
+            category = "hostname"
+            template = "HOST_{n:02d}.example.internal"
+            mapping_key = normalized
+        else:
+            category = rule.category
+            template = rule.placeholder_template
+            mapping_key = value
+
+        placeholder = _assign_placeholder(
+            category=category,
+            template=template,
+            value=value,
+            mapping=mapping,
+            counters=counters,
+            placeholder_values=placeholder_values,
+            applied=applied,
+            mapping_key=mapping_key,
+        )
+        full = match.group(0)
+        start = full[: match.start(2) - match.start(0)]
+        end = full[match.end(2) - match.start(0) :]
+        return start + placeholder + end
 
     return rule.pattern.sub(_replace, text)
 
@@ -429,6 +499,23 @@ def _valid_domain_user(value: str) -> bool:
     return True
 
 
+_FQDN_LIKE = re.compile(
+    r"(?i)^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
+)
+
+
+def _normalize_domain_context_value(value: str) -> str:
+    """Trim punctuation/noise from Domain: values before FQDN detection."""
+    normalized = value.rstrip(".,;:!?)]}")
+    normalized = re.sub(r"(?i)(\.[a-z]{2,63})\d+$", r"\1", normalized)
+    return normalized.rstrip(".")
+
+
+def _looks_like_fqdn(value: str) -> bool:
+    """Return True if the value looks like a fully-qualified domain name."""
+    return bool(_FQDN_LIKE.fullmatch(value))
+
+
 # ---------------------------------------------------------------------------
 # Compiled regex patterns
 # ---------------------------------------------------------------------------
@@ -514,7 +601,14 @@ _CONTEXT_SECRET = re.compile(
     r"(?:api[_-]?key|api[_-]?secret|access[_-]?key|private[_-]?key|"
     r"secret[_-]?key|signing[_-]?key|client[_-]?secret|"
     r"token|password|passwd|secret|auth|credential|bearer|"
-    r"user\s*id|username|ntlm|domain)"
+    r"user\s*id|username|ntlm)"
+    r"(?:\s*[:=]\s*)"
+    r"(['\"]?)([^\s'\"]{4,})\1"
+)
+
+_DOMAIN_CONTEXT = re.compile(
+    r"(?i)"
+    r"(?:domain)"
     r"(?:\s*[:=]\s*)"
     r"(['\"]?)([^\s'\"]{4,})\1"
 )
@@ -727,6 +821,14 @@ def build_default_rules() -> list[Rule]:
             priority=12,
             pattern=_NTLM_HASH,
             placeholder_template="NTLM_HASH_{n:02d}",
+        ),
+        Rule(
+            name="domain_context",
+            category="secret",
+            priority=15,
+            pattern=_DOMAIN_CONTEXT,
+            placeholder_template="SECRET_{n:02d}",
+            apply_fn=_domain_context_apply,
         ),
         Rule(
             name="context_secret",

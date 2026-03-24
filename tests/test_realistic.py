@@ -98,6 +98,15 @@ Nmap done: 256 IP addresses (2 hosts up) scanned in 43.21 seconds
         assert "PORT" in result
         assert "STATE" in result
 
+    def test_ldap_domain_banner_uses_hostname_placeholder(self):
+        text = (
+            "389/tcp  open ldap Microsoft Windows Active Directory LDAP "
+            "(Domain: sevenkingdoms.local0., Site: Default-First-Site-Name)"
+        )
+        result = _engine().redact(text)
+        _assert_clean(result, "sevenkingdoms.local0.,")
+        assert "HOST_" in result
+
 
 class TestNetexecOutput:
     """Synthetic netexec/crackmapexec output."""
