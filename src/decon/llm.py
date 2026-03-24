@@ -36,7 +36,7 @@ def _build_placeholder_re() -> re.Pattern[str]:
     # Also match custom value placeholders (from add_custom_values)
     fragments.append(r"REDACTED_\d+")
     # Domain-context FQDN placeholders are parent-domain style.
-    fragments.append(r"example(?:\d+)?\.internal")
+    fragments.append(r"example(?:\d+)?\.internal\d*")
 
     return re.compile(r"^(?:" + "|".join(fragments) + r")$")
 
@@ -135,6 +135,12 @@ _SAFE_WORDLISTS = {
     "fierce-hostlist.txt", "namelist.txt",
 }
 
+# Intentionally preserved Nmap boilerplate URLs.
+_SAFE_URLS = {
+    "https://nmap.org",
+    "https://nmap.org/submit/",
+}
+
 
 def _is_safe_software(value: str) -> bool:
     """Check if a flagged value is a known software/vendor name."""
@@ -149,11 +155,13 @@ def _is_safe_software(value: str) -> bool:
 
 
 def _is_safe_artifact(value: str) -> bool:
-    """Check if a flagged value is a timestamp or known public wordlist."""
+    """Check if a flagged value is a safe non-sensitive artifact."""
     stripped = value.strip()
     if _TIMESTAMP_RE.match(stripped):
         return True
     if stripped.lower() in _SAFE_WORDLISTS:
+        return True
+    if stripped.lower() in _SAFE_URLS:
         return True
     return False
 
@@ -176,7 +184,7 @@ def _normalize_finding(value: str) -> str:
     value = re.sub(r"^[a-zA-Z][-a-zA-Z0-9+.]*://", "", value)
     # Strip trailing path/port after protocol removal: "10.0.0.1:81/" -> "10.0.0.1"
     value = re.sub(r"^(\d+\.\d+\.\d+\.\d+)[:/].*$", r"\1", value)
-    return value.strip()
+    return value.strip().rstrip(".,;:!?")
 
 
 def _filter_placeholder_findings(response: str) -> str:
