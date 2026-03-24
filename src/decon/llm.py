@@ -104,14 +104,29 @@ _SAFE_SOFTWARE = {
 
 
 # Timestamps in tool output are never sensitive — they show when a tool ran,
-# not anything about the target.  Common formats:
-#   2024-09-09 16:04:31   |   2024-09-09T16:04:31   |   16:04:31   |   2024-09-09
+# not anything about the target. Common formats:
+#   2024-09-09 16:04:31   |   2024-09-09T16:04:31   |   16:04:31
+#   14:28:13 CDT 2026     |   Tue Mar 24 14:28:13 CDT 2026   |   2024-09-09
 _TIMESTAMP_RE = re.compile(
     r"^(?:"
     r"\d{4}-\d{2}-\d{2}[\sT]\d{2}:\d{2}(?::\d{2})?"  # datetime
     r"|\d{4}-\d{2}-\d{2}"                              # date only
     r"|\d{2}:\d{2}:\d{2}"                              # time only
+    r"|\d{2}:\d{2}:\d{2}(?:\s+[A-Z]{2,5})?\s+\d{4}"   # time tz year
+    r"|(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+"
+    r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+"
+    r"\d{1,2}\s+\d{2}:\d{2}:\d{2}(?:\s+[A-Z]{2,5})?\s+\d{4}"  # ctime/date
     r")$"
+)
+
+# Tool runtimes / elapsed times are also non-sensitive artifacts.
+_DURATION_RE = re.compile(
+    r"^\d+(?:\.\d+)?\s*"
+    r"(?:ms|msec|msecs|millisecond|milliseconds|"
+    r"s|sec|secs|second|seconds|"
+    r"m|min|mins|minute|minutes|"
+    r"h|hr|hrs|hour|hours)$",
+    re.IGNORECASE,
 )
 
 # Well-known public wordlists and resources that appear in pentest commands.
@@ -158,6 +173,8 @@ def _is_safe_artifact(value: str) -> bool:
     """Check if a flagged value is a safe non-sensitive artifact."""
     stripped = value.strip()
     if _TIMESTAMP_RE.match(stripped):
+        return True
+    if _DURATION_RE.match(stripped):
         return True
     if stripped.lower() in _SAFE_WORDLISTS:
         return True
