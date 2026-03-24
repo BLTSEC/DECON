@@ -1207,11 +1207,16 @@ class TestURLRedaction:
         assert result == "HTTP/1.1 200 OK"
 
     def test_nmap_output_urls(self):
-        """Real nmap output with URLs — all should be redacted."""
+        """Standard Nmap boilerplate URLs should pass through unchanged."""
         text = (
             "Service detection performed. Please report any incorrect results "
             "at https://nmap.org/submit/ .\n"
             "Starting Nmap 7.93 ( https://nmap.org ) at 2026-03-20"
         )
         result = _engine().redact(text)
-        _assert_clean(result, "https://nmap.org/submit/", "https://nmap.org")
+        assert "https://nmap.org/submit/" in result
+        assert "https://nmap.org" in result
+
+    def test_nmap_url_outside_boilerplate_still_redacted(self):
+        result = _engine().redact("bookmark https://nmap.org/submit/ for later")
+        _assert_clean(result, "https://nmap.org/submit/")

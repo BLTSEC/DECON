@@ -216,10 +216,13 @@ def _cli_flag_apply(
     placeholder_values = set(mapping.values())
 
     def _replace(match: re.Match[str]) -> str:
-        value = match.group(2)
+        flag = match.group(1)
+        value = match.group(3)
         mapping_key = rule.mapping_key_fn(value) if rule.mapping_key_fn else value
         # Skip file paths, template placeholders, and other non-secret values
         if _CLI_FLAG_SKIP_RE.match(value):
+            return match.group(0)
+        if flag == "-p" and _looks_like_port_spec(value) and _is_port_scan_command(text, match.start(0)):
             return match.group(0)
         if value in placeholder_values:
             return match.group(0)
@@ -237,11 +240,99 @@ def _cli_flag_apply(
         if applied is not None:
             applied.append((rule.category, value, placeholder))
         full = match.group(0)
-        start = full[: match.start(2) - match.start(0)]
-        end = full[match.end(2) - match.start(0) :]
+        start = full[: match.start(3) - match.start(0)]
+        end = full[match.end(3) - match.start(0) :]
         return start + placeholder + end
 
     return rule.pattern.sub(_replace, text)
+
+
+def _url_apply(
+    rule: Rule,
+    text: str,
+    mapping: dict[str, str],
+    counters: dict[str, int],
+    applied: list[tuple[str, str, str]] | None = None,
+) -> str:
+    """Apply URL redaction, skipping standard Nmap boilerplate URLs."""
+    placeholder_values = set(mapping.values())
+
+    def _replace(match: re.Match[str]) -> str:
+        value = match.group(0)
+        mapping_key = rule.mapping_key_fn(value) if rule.mapping_key_fn else value
+
+        if rule.validator and not rule.validator(value):
+            return value
+        if _is_nmap_boilerplate_url(text, match.start(0), value):
+            return value
+        if value in placeholder_values:
+            return value
+
+        if mapping_key in mapping:
+            placeholder = mapping[mapping_key]
+            if applied is not None:
+                applied.append((rule.category, value, placeholder))
+            return placeholder
+
+        cat = rule.category
+        n = counters.get(cat, 0) + 1
+        counters[cat] = n
+
+        placeholder = rule.placeholder_template.format(n=n)
+        mapping[mapping_key] = placeholder
+        placeholder_values.add(placeholder)
+        if applied is not None:
+            applied.append((rule.category, value, placeholder))
+        return placeholder
+
+    return rule.pattern.sub(_replace, text)
+
+
+def _looks_like_port_spec(value: str) -> bool:
+    """Return True for Nmap-style port lists/ranges like 80,443 or T:80,U:53."""
+    if not _PORT_SPEC.fullmatch(value):
+        return False
+
+    for token in value.split(","):
+        if ":" in token:
+            _, token = token.split(":", 1)
+        if "-" in token:
+            start, end = token.split("-", 1)
+            ports = (start, end)
+        else:
+            ports = (token,)
+        if any(not 0 <= int(port) <= 65535 for port in ports):
+            return False
+    return True
+
+
+def _is_port_scan_command(text: str, match_start: int) -> bool:
+    """Return True when the current match appears inside a port-scan command line."""
+    line_start = text.rfind("\n", 0, match_start) + 1
+    line_end = text.find("\n", match_start)
+    if line_end == -1:
+        line_end = len(text)
+    line = text[line_start:line_end].lower()
+    return any(tool in line for tool in ("nmap", "rustscan", "masscan", "naabu"))
+
+
+def _is_nmap_boilerplate_url(text: str, match_start: int, value: str) -> bool:
+    """Return True for the stock nmap.org URLs shown in standard Nmap output."""
+    if value not in {"https://nmap.org", "https://nmap.org/submit/"}:
+        return False
+
+    line_start = text.rfind("\n", 0, match_start) + 1
+    line_end = text.find("\n", match_start)
+    if line_end == -1:
+        line_end = len(text)
+    line = text[line_start:line_end]
+
+    return (
+        line.startswith("Starting Nmap ")
+        or line.startswith(
+            "Service detection performed. Please report any incorrect results "
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -430,10 +521,10 @@ _CONTEXT_SECRET = re.compile(
 
 _CLI_FLAG_SECRET = re.compile(
     r"(?:^|\s)"
-    r"(?:-p|-P|-pw|--password|--pw|-H|--hash|--hashes"
+    r"(-p|-P|-pw|--password|--pw|-H|--hash|--hashes"
     r"|-u|-l|--user|--login|--username|-U)"
     r"\s+"
-    r"(['\"]?)([^\s'\"]{3,})\1"
+    r"(['\"]?)([^\s'\"]{3,})\2"
     r"(?=\s|$)"
 )
 
@@ -544,6 +635,11 @@ _WINDOWS_SID = re.compile(
 
 _UNC_PATH = re.compile(
     r"\\\\[a-zA-Z0-9._-]+(?:\\[a-zA-Z0-9._$-]+)+"
+)
+
+_PORT_SPEC = re.compile(
+    r"^(?:[TUSP]:)?\d{1,5}(?:-\d{1,5})?"
+    r"(?:,(?:[TUSP]:)?\d{1,5}(?:-\d{1,5})?)*$"
 )
 
 
@@ -708,6 +804,7 @@ def build_default_rules() -> list[Rule]:
             pattern=_URL,
             placeholder_template="URL_REDACTED_{n:02d}",
             validator=_valid_url,
+            apply_fn=_url_apply,
         ),
         Rule(
             name="email",
