@@ -68,6 +68,28 @@ class TestCLIBasic:
         captured = capsys.readouterr()
         assert "10.4.12.50" in captured.out
 
+    def test_redact_custom_values(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            "sys.stdin",
+            StringIO("The password is Heartsbane and user is jon.snow\n"),
+        )
+        ret = main(["--redact", "Heartsbane,jon.snow"])
+        assert ret == 0
+        captured = capsys.readouterr()
+        assert "Heartsbane" not in captured.out
+        assert "jon.snow" not in captured.out
+        assert "REDACTED_01" in captured.out or "REDACTED_02" in captured.out
+
+    def test_redact_case_insensitive(self, monkeypatch, capsys):
+        monkeypatch.setattr(
+            "sys.stdin",
+            StringIO("Found HEARTSBANE in the config\n"),
+        )
+        ret = main(["--redact", "Heartsbane"])
+        assert ret == 0
+        captured = capsys.readouterr()
+        assert "HEARTSBANE" not in captured.out
+
     def test_verbose(self, monkeypatch, capsys):
         monkeypatch.setattr("sys.stdin", StringIO("10.4.12.50 admin@test.com\n"))
         ret = main(["-v"])

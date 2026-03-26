@@ -841,6 +841,13 @@ _LDAP_DESCRIPTION = re.compile(
     r"(?i)(description:\s+)([^\n]+)"
 )
 
+# JSON "description": "value" format (BloodHound, AD-related JSON exports).
+# Matches person display names like "Jon Snow", "Samwell Tarly (Password : ...)"
+# Group 1 = JSON key+quote prefix; group 2 = value to redact (up to closing quote).
+_JSON_DESCRIPTION = re.compile(
+    r'("description":\s*")([^"]{2,}?)(")'
+)
+
 # CN=<GroupOrUserName> in memberOf/DN context when nested directly under
 # CN=Users or CN=Builtin. Matches uppercase-start names like CN=Stark and
 # CN=Night Watch that are not caught by _LDAP_CN_LOWERCASE_USER.
@@ -867,7 +874,7 @@ _KERBEROAST_TABLE_NAME = re.compile(
 
 _CLI_FLAG_SECRET = re.compile(
     r"(?:^|\s)"
-    r"(-p|-P|-pw|--password|--pw|-H|--hash|--hashes"
+    r"(-p|-P|-pw|-w|-W|--password|--pw|-H|--hash|--hashes"
     r"|-u|-l|--user|--login|--username|-U)"
     r"\s+"
     r"(['\"]?)([^\s'\"]{3,})\2"
@@ -881,6 +888,7 @@ _CLI_FLAG_SKIP_RE = re.compile(
     r"|.*\.\w{2,4}$"              # ends with file extension (.txt, .list, etc.)
     r"|None\b"                    # Python None in output
     r"|-"                         # another flag
+    r"|%\{"                       # curl -w format string (%{http_code}, etc.)
     r")"
 )
 
@@ -1342,6 +1350,14 @@ def build_default_rules() -> list[Rule]:
             category="ad_domain_user",
             priority=49,
             pattern=_LDAP_DESCRIPTION,
+            placeholder_template="DOMAIN_USER_{n:02d}",
+            apply_fn=_apply_group(2),
+        ),
+        Rule(
+            name="json_description",
+            category="ad_domain_user",
+            priority=49,
+            pattern=_JSON_DESCRIPTION,
             placeholder_template="DOMAIN_USER_{n:02d}",
             apply_fn=_apply_group(2),
         ),

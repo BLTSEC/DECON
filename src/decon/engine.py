@@ -108,8 +108,13 @@ class RedactionEngine:
                 continue
             if not any(placeholder.startswith(p) for p in _safe_prefixes):
                 continue
-            # Only short identifiers — skip hashes, long values, special chars
-            if len(original) < 4 or len(original) > 30:
+            # Skip very short values (false positive risk) and non-identifiers
+            if len(original) < 4:
+                continue
+            # Allow FQDNs up to 80 chars (hostname.subdomain.domain.tld patterns)
+            # but cap other identifiers at 30 to skip hashes and long values
+            is_fqdn = "." in original and placeholder.startswith(("HOST_", "example"))
+            if len(original) > 80 or (len(original) > 30 and not is_fqdn):
                 continue
             if not re.fullmatch(r"[a-zA-Z0-9._$-]+", original):
                 continue
@@ -121,8 +126,16 @@ class RedactionEngine:
         # Sort longest-first to avoid partial replacement
         candidates.sort(key=lambda x: len(x[0]), reverse=True)
         for original, placeholder in candidates:
+            # Domain-type entries (example*.internal) use a permissive lookbehind
+            # that allows '.' before the match — catches subdomains like
+            # _msdcs.sevenkingdoms.local where the domain appears after a dot.
+            # Hostname/user entries use strict boundaries to avoid partial matches.
+            if placeholder.startswith("example"):
+                lookbehind = r"(?<!\w)"
+            else:
+                lookbehind = r"(?<![.\w])"
             pattern = re.compile(
-                r"(?<![.\w])" + re.escape(original) + r"(?![.\w])",
+                lookbehind + re.escape(original) + r"(?![.\w])",
                 re.IGNORECASE,
             )
             new_text = pattern.sub(placeholder, text)

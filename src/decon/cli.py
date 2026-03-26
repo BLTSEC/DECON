@@ -107,6 +107,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Values to pass through unredacted (comma-separated)",
     )
     parser.add_argument(
+        "--redact",
+        metavar="VALUES",
+        help="Extra literal values to redact (comma-separated)",
+    )
+    parser.add_argument(
         "--llm",
         action="store_true",
         help="Local LLM safety check via Ollama",
@@ -245,6 +250,10 @@ def main(argv: list[str] | None = None) -> int:
     # Allowlist
     if args.allow:
         engine.add_allowlist(_split_csv(args.allow))
+
+    # Custom redaction values
+    if args.redact:
+        engine.add_custom_values(_split_csv(args.redact), case_sensitive=False)
 
     # Import prior mapping
     if args.import_map:
