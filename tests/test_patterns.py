@@ -21,6 +21,7 @@ from decon.patterns import (
     _SPN,
     _LDAP_DN_DOMAIN,
     _LDAP_SAMACCOUNTNAME,
+    _AD_DOMAIN_USER_SLASH,
 )
 
 
@@ -287,3 +288,48 @@ class TestLuhn:
 
     def test_short(self):
         assert not _luhn_check("123")
+
+
+class TestAdDomainUserSlash:
+    # BUG-8: SSDP/UPnP and LDAP path components must not match ad_domain_user_slash
+
+    def test_matches_bare_spn(self):
+        # CIFS/winterfell falls through from SPN rule (no FQDN) to this rule
+        m = _AD_DOMAIN_USER_SLASH.search("msDS-AllowedToDelegateTo: CIFS/winterfell")
+        assert m is not None
+        assert m.group(0) == "CIFS/winterfell"
+
+    def test_matches_domain_slash_user(self):
+        m = _AD_DOMAIN_USER_SLASH.search("NORTH/samwell.tarly")
+        assert m is not None
+        assert m.group(0) == "NORTH/samwell.tarly"
+
+    def test_no_match_ssdp_upnp(self):
+        # BUG-8: nmap service description should not be redacted as AD user
+        assert _AD_DOMAIN_USER_SLASH.search("Microsoft HTTPAPI httpd 2.0 (SSDP/UPnP)") is None
+
+    def test_no_match_ldap_path_component(self):
+        # BUG-8: LDAP referral URL path /DC=... should not match
+        assert _AD_DOMAIN_USER_SLASH.search(
+            "ref: ldap://DomainDnsZones.north.sevenkingdoms.local/DC=DomainDnsZones"
+        ) is None
+
+    def test_no_match_short_abbreviation(self):
+        assert _AD_DOMAIN_USER_SLASH.search("GNU/Linux") is None
+
+
+class TestIPv6FalsePositive:
+    # BUG-9: hex segments in OIDs must not match as IPv6
+
+    def test_no_match_oid_double_colon(self):
+        # nmap SAN: othername: 1.3.6.1.4.1.311.25.1::<unsupported>
+        assert _IPV6.search("1.3.6.1.4.1.311.25.1::") is None
+
+    def test_still_matches_real_ipv6(self):
+        assert _IPV6.search("fd00::1") is not None
+
+    def test_still_matches_full_ipv6(self):
+        assert _IPV6.search("2001:db8::1") is not None
+
+    def test_still_matches_link_local(self):
+        assert _IPV6.search("fe80::1%eth0") is not None
