@@ -815,6 +815,18 @@ _AD_DOMAIN_USER_BACKSLASH = re.compile(
     r"(?![\w\\])"
 )
 
+# Kerberos SPN format: ServiceClass/hostname.domain[:port]
+# Must be checked before ad_domain_user_slash (priority 24 vs 25).
+# Requires an FQDN instance name (at least one dot) to avoid false positives
+# on short abbreviations like CIFS/host (no dot) which fall through to ad_domain_user_slash.
+_SPN = re.compile(
+    r"(?<![\w\/])"
+    r"[A-Za-z][A-Za-z0-9_-]{1,30}"                           # ServiceClass (e.g. CIFS, MSSQLSvc)
+    r"/[a-zA-Z0-9](?:[a-zA-Z0-9-]*\.)+[a-zA-Z]{2,}"         # /host.domain (FQDN required)
+    r"(?::[0-9]{1,5})?"                                       # optional :port
+    r"(?![\w\/])"
+)
+
 # Forward-slash requires FQDN domain (with dots) OR uppercase domain of 4+ chars
 # to avoid matching abbreviations like SMB/WMI, TGT/TGS, R/W, GNU/Linux.
 _AD_DOMAIN_USER_SLASH = re.compile(
@@ -1015,6 +1027,13 @@ def build_default_rules() -> list[Rule]:
             pattern=_CC,
             placeholder_template="CC_REDACTED_{n:02d}",
             validator=_luhn_check,
+        ),
+        Rule(
+            name="spn",
+            category="spn",
+            priority=24,
+            pattern=_SPN,
+            placeholder_template="SPN_{n:02d}",
         ),
         Rule(
             name="ad_domain_user",
