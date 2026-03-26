@@ -22,6 +22,12 @@ from decon.patterns import (
     _LDAP_DN_DOMAIN,
     _LDAP_SAMACCOUNTNAME,
     _AD_DOMAIN_USER_SLASH,
+    _IMPACKET_STATUS_USER,
+    _LDAP_CN_LOWERCASE_USER,
+    _LDAP_COMMENT_USER,
+    _NETEXEC_SPRAY_PASSWORD,
+    _LDAP_DESCRIPTION,
+    _LDAP_CN_USERS_MEMBER,
 )
 
 
@@ -333,3 +339,105 @@ class TestIPv6FalsePositive:
 
     def test_still_matches_link_local(self):
         assert _IPV6.search("fe80::1%eth0") is not None
+
+
+class TestImpacketStatusUser:
+    # BUG-10: GetNPUsers and netexec status lines expose usernames
+
+    def test_getnpusers_user_line(self):
+        m = _IMPACKET_STATUS_USER.search("[-] User jon.snow doesn't have UF_DONT_REQUIRE_PREAUTH set")
+        assert m is not None
+        assert m.group(2) == "jon.snow"
+
+    def test_netexec_testing_line(self):
+        m = _IMPACKET_STATUS_USER.search("[*] Testing brandon.stark")
+        assert m is not None
+        assert m.group(2) == "brandon.stark"
+
+    def test_no_match_without_prefix(self):
+        # standalone username without known prefix should not match
+        assert _IMPACKET_STATUS_USER.search("jon.snow") is None
+
+
+class TestLdapCnLowercaseUser:
+    # BUG-12: CN=<lowercase> usernames in LDAP DNs
+
+    def test_matches_dotted_username(self):
+        m = _LDAP_CN_LOWERCASE_USER.search("dn: CN=jon.snow,CN=Users,DC=corp")
+        assert m is not None
+        assert m.group(2) == "jon.snow"
+
+    def test_matches_service_account(self):
+        m = _LDAP_CN_LOWERCASE_USER.search("CN=sql_svc,CN=Users")
+        assert m is not None
+        assert m.group(2) == "sql_svc"
+
+    def test_no_match_uppercase_container(self):
+        assert _LDAP_CN_LOWERCASE_USER.search("CN=Users,DC=corp") is None
+        assert _LDAP_CN_LOWERCASE_USER.search("CN=Builtin,DC=corp") is None
+
+
+class TestLdapCommentUser:
+    # BUG-12: ldapsearch comment lines expose CN values
+
+    def test_matches_comment_cn(self):
+        m = _LDAP_COMMENT_USER.search("# jon.snow, Users, north.sevenkingdoms.local")
+        assert m is not None
+        assert m.group(2) == "jon.snow"
+
+    def test_no_match_without_comma(self):
+        assert _LDAP_COMMENT_USER.search("# numEntries: 1") is None
+
+
+class TestNetexecSprayPassword:
+    # Password spray passwords should be redacted
+
+    def test_matches_password_with_domain(self):
+        m = _NETEXEC_SPRAY_PASSWORD.search("[*] Trying: hodor on north")
+        assert m is not None
+        assert m.group(2) == "hodor"
+
+    def test_matches_standalone_password(self):
+        m = _NETEXEC_SPRAY_PASSWORD.search("[*] Trying: Password1")
+        assert m is not None
+        assert m.group(2) == "Password1"
+
+    def test_no_match_without_prefix(self):
+        assert _NETEXEC_SPRAY_PASSWORD.search("hodor") is None
+
+
+class TestLdapDescription:
+    # LDAP description attribute values should be redacted
+
+    def test_matches_display_name(self):
+        m = _LDAP_DESCRIPTION.search("description: Arya Stark")
+        assert m is not None
+        assert m.group(2) == "Arya Stark"
+
+    def test_matches_builtin_description(self):
+        # built-in descriptions are also redacted (acceptable collateral)
+        m = _LDAP_DESCRIPTION.search("description: Built-in account for administering the computer/domain")
+        assert m is not None
+
+    def test_preserves_prefix(self):
+        m = _LDAP_DESCRIPTION.search("description: Jon Snow")
+        assert m.group(1) == "description: "
+        assert m.group(2) == "Jon Snow"
+
+
+class TestLdapCnUsersMember:
+    # Uppercase CN= group names nested under CN=Users should be redacted
+
+    def test_matches_custom_group(self):
+        m = _LDAP_CN_USERS_MEMBER.search("memberOf: CN=Stark,CN=Users,DC=north")
+        assert m is not None
+        assert m.group(2) == "Stark"
+
+    def test_matches_multiword_group(self):
+        m = _LDAP_CN_USERS_MEMBER.search("CN=Night Watch,CN=Users,DC=north")
+        assert m is not None
+        assert m.group(2) == "Night Watch"
+
+    def test_no_match_top_level_cn_users(self):
+        # CN=Users itself (followed by DC=, not CN=Users) should not match
+        assert _LDAP_CN_USERS_MEMBER.search("CN=Users,DC=corp") is None

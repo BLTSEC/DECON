@@ -796,9 +796,65 @@ _LDAP_DN_DOMAIN = re.compile(
 )
 
 # Matches LDAP sAMAccountName attribute value.
+# Handles both attribute output (sAMAccountName: value) and filter syntax (sAMAccountName=value).
 # Group 1 = attribute prefix; group 2 = value to redact.
+# Excludes ) from value to avoid consuming the closing paren in LDAP search filters.
 _LDAP_SAMACCOUNTNAME = re.compile(
-    r"(?i)(sAMAccountName:\s*)([^\s\n]+)"
+    r"(?i)(sAMAccountName[=:]\s*)([^\s\n)]+)"
+)
+
+# BUG-10: Impacket GetNPUsers.py "[-] User <name> doesn't have..." and
+# netexec/CME "[*] Testing <name>" status lines.
+# Group 1 = status prefix; group 2 = username to redact.
+_IMPACKET_STATUS_USER = re.compile(
+    r"(\[-\] User |\[\*\] Testing |\[!\] Testing )([a-zA-Z][a-zA-Z0-9._-]+)(?=\s|$)"
+)
+
+# netexec password spray "[*] Trying: <password>" status lines.
+# Group 1 = prefix; group 2 = password value to redact (everything up to end-of-line
+# or the literal " on " domain suffix common in spray output).
+_NETEXEC_SPRAY_PASSWORD = re.compile(
+    r"(\[\*\] Trying:\s+)(\S+?)(?=\s+on\s|\s*\n|\s*$)"
+)
+
+# BUG-12: CN=<lowercase-name> in LDAP DNs (user objects like CN=jon.snow).
+# Requires lowercase start to avoid matching well-known containers (CN=Users,
+# CN=Builtin, CN=Configuration, CN=Schema, etc. which start uppercase).
+# Group 1 = CN= prefix; group 2 = username to redact.
+_LDAP_CN_LOWERCASE_USER = re.compile(
+    r"(CN=)([a-z][a-z0-9._-]+)(?=[,\n])"
+)
+
+# BUG-12: ldapsearch comment line "# <name>, <parent>, ..." format.
+# The first word on lines like "# jon.snow, Users, north.sevenkingdoms.local"
+# is the CN value and should be redacted.
+# Group 1 = "# " prefix; group 2 = name to redact.
+_LDAP_COMMENT_USER = re.compile(
+    r"(?m)^(#\s+)([a-z][a-z0-9._-]+)(?=,)"
+)
+
+# LDAP description attribute — user display names and custom account notes.
+# Redacts all description: values; built-in descriptions (Administrator, Guest,
+# krbtgt) are acceptable collateral since their sAMAccountName is already hidden.
+# Group 1 = attribute prefix; group 2 = value to redact.
+_LDAP_DESCRIPTION = re.compile(
+    r"(?i)(description:\s+)([^\n]+)"
+)
+
+# CN=<GroupOrUserName> in memberOf/DN context when nested directly under
+# CN=Users or CN=Builtin. Matches uppercase-start names like CN=Stark and
+# CN=Night Watch that are not caught by _LDAP_CN_LOWERCASE_USER.
+# Group 1 = CN= prefix; group 2 = name to redact.
+_LDAP_CN_USERS_MEMBER = re.compile(
+    r"(CN=)([A-Z][^,\n]+?)(?=,CN=(?:Users|Builtin)(?:[,\n]|$))"
+)
+
+# BUG-13: Standalone username in GetUserSPNs.py / GetNPUsers.py kerberoast table
+# Name column.  By priority 49 the SPN rule (priority 24) has already replaced
+# SPNs with SPN_XX, so the Name column appears right after the placeholder.
+# Group 0 is the full match; capture group 1 = username.
+_KERBEROAST_TABLE_NAME = re.compile(
+    r"(?:SPN_\d+)\s{2,}([a-z][a-z0-9._-]+)(?=\s)"
 )
 
 _CLI_FLAG_SECRET = re.compile(
@@ -1222,6 +1278,62 @@ def build_default_rules() -> list[Rule]:
             category="ad_domain_user",
             priority=48,
             pattern=_LDAP_SAMACCOUNTNAME,
+            placeholder_template="DOMAIN_USER_{n:02d}",
+            apply_fn=_apply_group(2),
+        ),
+        Rule(
+            name="impacket_status_user",
+            category="ad_domain_user",
+            priority=49,
+            pattern=_IMPACKET_STATUS_USER,
+            placeholder_template="DOMAIN_USER_{n:02d}",
+            apply_fn=_apply_group(2),
+        ),
+        Rule(
+            name="netexec_spray_password",
+            category="secret",
+            priority=49,
+            pattern=_NETEXEC_SPRAY_PASSWORD,
+            placeholder_template="SECRET_{n:02d}",
+            apply_fn=_apply_group(2),
+        ),
+        Rule(
+            name="ldap_cn_lowercase_user",
+            category="ad_domain_user",
+            priority=49,
+            pattern=_LDAP_CN_LOWERCASE_USER,
+            placeholder_template="DOMAIN_USER_{n:02d}",
+            apply_fn=_apply_group(2),
+        ),
+        Rule(
+            name="ldap_comment_user",
+            category="ad_domain_user",
+            priority=49,
+            pattern=_LDAP_COMMENT_USER,
+            placeholder_template="DOMAIN_USER_{n:02d}",
+            apply_fn=_apply_group(2),
+        ),
+        Rule(
+            name="kerberoast_table_name",
+            category="ad_domain_user",
+            priority=49,
+            pattern=_KERBEROAST_TABLE_NAME,
+            placeholder_template="DOMAIN_USER_{n:02d}",
+            apply_fn=_apply_group(1),
+        ),
+        Rule(
+            name="ldap_description",
+            category="ad_domain_user",
+            priority=49,
+            pattern=_LDAP_DESCRIPTION,
+            placeholder_template="DOMAIN_USER_{n:02d}",
+            apply_fn=_apply_group(2),
+        ),
+        Rule(
+            name="ldap_cn_users_member",
+            category="ad_domain_user",
+            priority=49,
+            pattern=_LDAP_CN_USERS_MEMBER,
             placeholder_template="DOMAIN_USER_{n:02d}",
             apply_fn=_apply_group(2),
         ),
