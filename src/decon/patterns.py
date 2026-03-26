@@ -700,7 +700,7 @@ _CIDR = re.compile(
 )
 
 _IPV6 = re.compile(
-    r"(?<![:\w])"
+    r"(?<![.:\w])"
     r"(?:"
     r"fe80:(?::[0-9a-fA-F]{1,4}){0,4}%[0-9a-zA-Z]+"
     r"|(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}"
@@ -887,13 +887,15 @@ _SPN = re.compile(
 
 # Forward-slash requires FQDN domain (with dots) OR uppercase domain of 4+ chars
 # to avoid matching abbreviations like SMB/WMI, TGT/TGS, R/W, GNU/Linux.
+# The hostname/username after / must start with lowercase to exclude protocol
+# abbreviations like SSDP/UPnP and LDAP path components like domain.local/DC=...
 _AD_DOMAIN_USER_SLASH = re.compile(
     r"(?<![\w\/])"
     r"(?:"
     r"[A-Z][A-Z0-9]{3,14}"                              # CORP, INLANEFREIGHT (4+ uppercase)
     r"|[a-zA-Z0-9](?:[a-zA-Z0-9-]*\.)+[a-zA-Z]{2,}"     # megacorp.local (FQDN)
     r")"
-    r"\/[a-zA-Z][a-zA-Z0-9._-]*"                         # /username (must start with alpha)
+    r"\/[a-z][a-zA-Z0-9._-]*"                            # /username (must start with lowercase)
     r"(?::[^\s@]{4,})?(?:@[^\s]+)?"                       # optional :password@host
     r"(?![\w\/])"
 )
