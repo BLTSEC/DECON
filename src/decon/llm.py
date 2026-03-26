@@ -231,6 +231,22 @@ def _filter_placeholder_findings(response: str) -> str:
     return filtered
 
 
+def parse_findings(response: str) -> list[str]:
+    """Extract clean values from FOUND: lines in an LLM review response."""
+    values: list[str] = []
+    seen: set[str] = set()
+    for line in response.splitlines():
+        if line.startswith("FOUND:"):
+            raw = line[len("FOUND:"):].strip().strip('"').strip("'").strip()
+            if not raw:
+                continue
+            value = _normalize_finding(raw)
+            if value and value.lower() not in seen:
+                seen.add(value.lower())
+                values.append(value)
+    return values
+
+
 def llm_review(
     text: str,
     model: str = "qwen3.5:9b",
