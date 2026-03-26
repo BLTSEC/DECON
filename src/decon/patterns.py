@@ -635,6 +635,51 @@ def _rdns_hostname_apply(
     return rule.pattern.sub(_replace, text)
 
 
+def _ldap_dn_domain_apply(
+    rule: Rule,
+    text: str,
+    mapping: dict[str, str],
+    counters: dict[str, int],
+    applied: list[tuple[str, str, str]] | None = None,
+) -> str:
+    """Redact LDAP DN domain suffix (DC=x,DC=y,...), reusing existing hostname placeholders."""
+    placeholder_values = set(mapping.values())
+
+    def _replace(match: re.Match[str]) -> str:
+        leading = match.group(1)
+        dc_chain = match.group(2)
+        if dc_chain in placeholder_values:
+            return match.group(0)
+
+        # Convert DC=north,DC=sevenkingdoms,DC=local → north.sevenkingdoms.local
+        parts = re.findall(r"(?i)DC=([a-zA-Z0-9-]+)", dc_chain)
+        fqdn = ".".join(parts)
+        fqdn_key = fqdn.casefold()
+
+        # Reuse an existing placeholder if hostname_internal already mapped this domain
+        placeholder = None
+        for key, ph in mapping.items():
+            if key.casefold() == fqdn_key:
+                placeholder = ph
+                break
+
+        if placeholder is None:
+            placeholder = _assign_domain_placeholder(
+                value=fqdn,
+                mapping=mapping,
+                counters=counters,
+                placeholder_values=placeholder_values,
+                applied=applied,
+                mapping_key=fqdn_key,
+            )
+        elif applied is not None:
+            applied.append((rule.category, dc_chain, placeholder))
+
+        return leading + placeholder
+
+    return rule.pattern.sub(_replace, text)
+
+
 # ---------------------------------------------------------------------------
 # Compiled regex patterns
 # ---------------------------------------------------------------------------
@@ -740,7 +785,20 @@ _RDNS_SINGLE_LABEL = re.compile(
 )
 
 _SMB_NETBIOS_NAME = re.compile(
-    r"(\(name:)([A-Z][A-Z0-9-]{1,14})(?=\))"
+    r"(\(name:|CN=)([A-Z][A-Z0-9-]{1,14})(?=\)|,)"
+)
+
+# Matches LDAP DN domain suffix: DC=north,DC=sevenkingdoms,DC=local
+# Leading comma (group 1) is preserved; DC= chain (group 2) is replaced.
+# Requires 2+ DC= components so single DC=foo never fires as a false positive.
+_LDAP_DN_DOMAIN = re.compile(
+    r"(?i)(,?)(DC=[a-zA-Z0-9-]+(?:,DC=[a-zA-Z0-9-]+)+)"
+)
+
+# Matches LDAP sAMAccountName attribute value.
+# Group 1 = attribute prefix; group 2 = value to redact.
+_LDAP_SAMACCOUNTNAME = re.compile(
+    r"(?i)(sAMAccountName:\s*)([^\s\n]+)"
 )
 
 _CLI_FLAG_SECRET = re.compile(
@@ -1148,6 +1206,22 @@ def build_default_rules() -> list[Rule]:
             pattern=_SMB_NETBIOS_NAME,
             placeholder_template="HOST_{n:02d}",
             apply_fn=_rdns_hostname_apply,
+        ),
+        Rule(
+            name="ldap_dn_domain",
+            category="domain",
+            priority=47,
+            pattern=_LDAP_DN_DOMAIN,
+            placeholder_template="example.internal",
+            apply_fn=_ldap_dn_domain_apply,
+        ),
+        Rule(
+            name="ldap_samaccountname",
+            category="ad_domain_user",
+            priority=48,
+            pattern=_LDAP_SAMACCOUNTNAME,
+            placeholder_template="DOMAIN_USER_{n:02d}",
+            apply_fn=_apply_group(2),
         ),
     ]
 

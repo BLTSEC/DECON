@@ -19,6 +19,8 @@ from decon.patterns import (
     _KERBEROS_HASH,
     _SMB_NETBIOS_NAME,
     _SPN,
+    _LDAP_DN_DOMAIN,
+    _LDAP_SAMACCOUNTNAME,
 )
 
 
@@ -207,6 +209,73 @@ class TestSPN:
 
     def test_no_match_abbreviation(self):
         assert _SPN.search("SMB/WMI") is None
+
+
+class TestSmbNetbiosNameExtended:
+    # BUG-7: machine names in CN= LDAP DN context must also be redacted
+    def test_matches_cn_machine_name(self):
+        m = _SMB_NETBIOS_NAME.search("CN=WINTERFELL,OU=Domain Controllers")
+        assert m is not None
+        assert m.group(2) == "WINTERFELL"
+
+    def test_no_match_cn_lowercase(self):
+        # CN= with lowercase value is not a NetBIOS machine name
+        assert _SMB_NETBIOS_NAME.search("CN=Users,DC=corp,DC=local") is None
+
+    def test_still_matches_name_context(self):
+        m = _SMB_NETBIOS_NAME.search("(name:CASTELBLACK)")
+        assert m is not None
+        assert m.group(2) == "CASTELBLACK"
+
+
+class TestLdapDnDomain:
+    # BUG-5: LDAP DN domain suffix DC=x,DC=y,... must be redacted
+    def test_matches_three_components(self):
+        m = _LDAP_DN_DOMAIN.search("DC=north,DC=sevenkingdoms,DC=local")
+        assert m is not None
+        assert m.group(2) == "DC=north,DC=sevenkingdoms,DC=local"
+
+    def test_matches_two_components(self):
+        m = _LDAP_DN_DOMAIN.search("DC=sevenkingdoms,DC=local")
+        assert m is not None
+        assert m.group(2) == "DC=sevenkingdoms,DC=local"
+
+    def test_captures_leading_comma(self):
+        m = _LDAP_DN_DOMAIN.search("CN=Users,DC=north,DC=sevenkingdoms,DC=local")
+        assert m is not None
+        assert m.group(1) == ","
+        assert m.group(2) == "DC=north,DC=sevenkingdoms,DC=local"
+
+    def test_no_match_single_component(self):
+        # Single DC= should NOT match — needs 2+ components
+        assert _LDAP_DN_DOMAIN.search("DC=local") is None
+
+    def test_case_insensitive(self):
+        m = _LDAP_DN_DOMAIN.search("dc=corp,dc=local")
+        assert m is not None
+
+
+class TestLdapSamAccountName:
+    # BUG-6: sAMAccountName attribute value must be redacted
+    def test_matches_user(self):
+        m = _LDAP_SAMACCOUNTNAME.search("sAMAccountName: arya.stark")
+        assert m is not None
+        assert m.group(2) == "arya.stark"
+
+    def test_matches_machine_account(self):
+        m = _LDAP_SAMACCOUNTNAME.search("sAMAccountName: WINTERFELL$")
+        assert m is not None
+        assert m.group(2) == "WINTERFELL$"
+
+    def test_case_insensitive(self):
+        m = _LDAP_SAMACCOUNTNAME.search("samaccountname: hodor")
+        assert m is not None
+        assert m.group(2) == "hodor"
+
+    def test_preserves_prefix(self):
+        m = _LDAP_SAMACCOUNTNAME.search("sAMAccountName: jon.snow")
+        assert m.group(1) == "sAMAccountName: "
+        assert m.group(2) == "jon.snow"
 
 
 class TestLuhn:
