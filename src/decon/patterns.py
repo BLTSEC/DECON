@@ -849,6 +849,14 @@ _LDAP_CN_USERS_MEMBER = re.compile(
     r"(CN=)([A-Z][^,\n]+?)(?=,CN=(?:Users|Builtin)(?:[,\n]|$))"
 )
 
+# nmap NTLM info fields (rdp-ntlm-info, smb2-ntlm-info):
+# Target_Name, NetBIOS_Domain_Name, NetBIOS_Computer_Name are short NetBIOS
+# names that may not appear elsewhere as FQDNs.
+# Group 1 = field prefix; group 2 = value to redact.
+_NMAP_NTLM_FIELD = re.compile(
+    r"(\|\s+(?:Target_Name|NetBIOS_Domain_Name|NetBIOS_Computer_Name):\s+)(\S+)"
+)
+
 # BUG-13: Standalone username in GetUserSPNs.py / GetNPUsers.py kerberoast table
 # Name column.  By priority 49 the SPN rule (priority 24) has already replaced
 # SPNs with SPN_XX, so the Name column appears right after the placeholder.
@@ -1311,6 +1319,14 @@ def build_default_rules() -> list[Rule]:
             priority=49,
             pattern=_LDAP_COMMENT_USER,
             placeholder_template="DOMAIN_USER_{n:02d}",
+            apply_fn=_apply_group(2),
+        ),
+        Rule(
+            name="nmap_ntlm_field",
+            category="hostname",
+            priority=49,
+            pattern=_NMAP_NTLM_FIELD,
+            placeholder_template="HOST_{n:02d}",
             apply_fn=_apply_group(2),
         ),
         Rule(
