@@ -10,6 +10,9 @@ from decon.patterns import Rule, build_default_rules
 
 AppliedRedaction = tuple[str, str, str]
 _HOST_PLACEHOLDER = re.compile(r"HOST_(\d{2})(?:\.example\.internal)?")
+# RFC 2849 LDIF line folding: continuation lines start with a single space.
+_LDAP_FOLD = re.compile(r"\n (?=\S)")
+_LDAP_MARKER = re.compile(r"(?:^|\n)(?:dn|memberOf|ref): ", re.MULTILINE)
 
 
 @dataclass
@@ -52,8 +55,20 @@ class RedactionEngine:
         """Redact sensitive data from text using all enabled rules."""
         return self.redact_with_report(text).text
 
+    @staticmethod
+    def _unfold_ldap(text: str) -> str:
+        """Unfold LDAP/LDIF line continuations (RFC 2849).
+
+        Only applied when LDAP markers (dn:, memberOf:, ref:) are detected
+        to avoid mangling non-LDAP output like ASCII art banners.
+        """
+        if not _LDAP_MARKER.search(text):
+            return text
+        return _LDAP_FOLD.sub("", text)
+
     def redact_with_report(self, text: str) -> RedactionReport:
         """Redact text and return details about replacements applied."""
+        text = self._unfold_ldap(text)
         existing_hostname_placeholders = {
             value
             for value in self.mapping.values()
@@ -64,9 +79,65 @@ class RedactionEngine:
             if not rule.enabled:
                 continue
             text = rule.apply(text, self.mapping, self.counters, applied)
+        text = self._retrospective_replace(text, applied)
         if not existing_hostname_placeholders:
             text, applied = self._normalize_hostname_placeholders(text, applied)
         return RedactionReport(text=text, applied=applied)
+
+    def _retrospective_replace(
+        self,
+        text: str,
+        applied: list[AppliedRedaction],
+    ) -> str:
+        """Replace remaining standalone occurrences of already-mapped values.
+
+        After all pattern rules run, some mapped values (hostnames, domains,
+        usernames) may still appear in contexts that no rule anticipated.
+        This pass uses word boundaries to replace them case-insensitively.
+
+        Only applies to short identifier-like values (4-30 chars, no special
+        characters) mapped to HOST_, DOMAIN_USER_, or example* placeholders
+        to minimize false positive risk.
+        """
+        placeholder_values = set(self.mapping.values())
+        # Collect safe candidates: identifiers already mapped by pattern rules
+        _safe_prefixes = ("HOST_", "DOMAIN_USER_", "example")
+        candidates: list[tuple[str, str]] = []
+        for original, placeholder in self.mapping.items():
+            if original == placeholder:  # allowlist identity
+                continue
+            if not any(placeholder.startswith(p) for p in _safe_prefixes):
+                continue
+            # Only short identifiers — skip hashes, long values, special chars
+            if len(original) < 4 or len(original) > 30:
+                continue
+            if not re.fullmatch(r"[a-zA-Z0-9._$-]+", original):
+                continue
+            candidates.append((original, placeholder))
+
+        if not candidates:
+            return text
+
+        # Sort longest-first to avoid partial replacement
+        candidates.sort(key=lambda x: len(x[0]), reverse=True)
+        for original, placeholder in candidates:
+            pattern = re.compile(
+                r"(?<![.\w])" + re.escape(original) + r"(?![.\w])",
+                re.IGNORECASE,
+            )
+            new_text = pattern.sub(placeholder, text)
+            if new_text != text:
+                # Track the replacement if new occurrences were found
+                if placeholder.startswith("HOST_"):
+                    cat = "hostname"
+                elif placeholder.startswith("DOMAIN_USER_"):
+                    cat = "ad_domain_user"
+                else:
+                    cat = "domain"
+                applied.append((cat, original, placeholder))
+                text = new_text
+
+        return text
 
     def unredact(self, text: str) -> str:
         """Replace placeholders with original values using reverse mapping."""
