@@ -18,6 +18,7 @@ from decon.patterns import (
     _CONTEXT_SECRET,
     _KERBEROS_HASH,
     _SMB_NETBIOS_NAME,
+    _SPN,
 )
 
 
@@ -183,6 +184,29 @@ class TestSmbNetbiosName:
     def test_no_match_fqdn(self):
         # FQDNs are handled by hostname_internal, not this rule
         assert _SMB_NETBIOS_NAME.search("(name:host.corp.local)") is None
+
+
+class TestSPN:
+    # QUIRK-2: SPNs with FQDN instance names get SPN_XX placeholder, not DOMAIN_USER_XX
+    def test_matches_fqdn_spn(self):
+        m = _SPN.search("CIFS/winterfell.north.sevenkingdoms.local")
+        assert m is not None
+        assert m.group(0) == "CIFS/winterfell.north.sevenkingdoms.local"
+
+    def test_matches_mssql_spn_with_port(self):
+        m = _SPN.search("MSSQLSvc/castelblack.north.sevenkingdoms.local:1433")
+        assert m is not None
+
+    def test_matches_http_spn(self):
+        m = _SPN.search("HTTP/eyrie.north.sevenkingdoms.local")
+        assert m is not None
+
+    def test_no_match_without_fqdn(self):
+        # bare hostname (no dot) falls through to ad_domain_user_slash
+        assert _SPN.search("CIFS/winterfell") is None
+
+    def test_no_match_abbreviation(self):
+        assert _SPN.search("SMB/WMI") is None
 
 
 class TestLuhn:
