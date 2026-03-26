@@ -8,3 +8,8 @@ build/
 *.swp
 *.swo
 .DS_Store
+
+# Kerberos credential cache files
+*.ccache
+*.ccach
+*.kirbi
