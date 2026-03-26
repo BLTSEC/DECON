@@ -4,8 +4,10 @@ import json
 import sys
 from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
-from decon.cli import main
+from decon.cli import main, _prompt_llm_review
+from decon.llm import parse_findings
 
 
 class TestCLIBasic:
@@ -178,3 +180,105 @@ class TestCLIBasic:
         assert ret == 1
         captured = capsys.readouterr()
         assert "10.0.0.1" not in captured.out
+
+
+class TestParseFindings:
+    def test_extracts_values(self):
+        response = "FOUND: jimmy.johns\nFOUND: DC01\n"
+        assert parse_findings(response) == ["jimmy.johns", "DC01"]
+
+    def test_deduplicates(self):
+        response = "FOUND: DC01\nFOUND: dc01\n"
+        assert parse_findings(response) == ["DC01"]
+
+    def test_strips_quotes_and_whitespace(self):
+        response = "FOUND: \"jimmy.johns\"\nFOUND:  'DC01' \n"
+        assert parse_findings(response) == ["jimmy.johns", "DC01"]
+
+    def test_skips_empty(self):
+        response = "FOUND:\nFOUND: DC01\n"
+        assert parse_findings(response) == ["DC01"]
+
+    def test_normalizes_commentary(self):
+        response = "FOUND: 10.1.2.3 (target IP)\n"
+        assert parse_findings(response) == ["10.1.2.3"]
+
+    def test_clean_response(self):
+        assert parse_findings("CLEAN") == []
+
+
+class TestPromptLLMReview:
+    def test_select_all(self):
+        tty = StringIO("all\n")
+        with patch("builtins.open", return_value=tty):
+            result = _prompt_llm_review(["jimmy.johns", "DC01"])
+        assert result == ["jimmy.johns", "DC01"]
+
+    def test_enter_defaults_to_all(self):
+        tty = StringIO("\n")
+        with patch("builtins.open", return_value=tty):
+            result = _prompt_llm_review(["jimmy.johns", "DC01"])
+        assert result == ["jimmy.johns", "DC01"]
+
+    def test_select_numbers(self):
+        tty = StringIO("2\n")
+        with patch("builtins.open", return_value=tty):
+            result = _prompt_llm_review(["jimmy.johns", "DC01"])
+        assert result == ["DC01"]
+
+    def test_select_multiple(self):
+        tty = StringIO("1,2\n")
+        with patch("builtins.open", return_value=tty):
+            result = _prompt_llm_review(["jimmy.johns", "DC01"])
+        assert result == ["jimmy.johns", "DC01"]
+
+    def test_none_skips(self):
+        tty = StringIO("none\n")
+        with patch("builtins.open", return_value=tty):
+            result = _prompt_llm_review(["jimmy.johns", "DC01"])
+        assert result == []
+
+    def test_tty_unavailable_defaults_to_all(self):
+        with patch("builtins.open", side_effect=OSError):
+            result = _prompt_llm_review(["jimmy.johns"])
+        assert result == ["jimmy.johns"]
+
+
+class TestLLMInteractiveFlow:
+    def test_interactive_redacts_selected(self, monkeypatch, capsys):
+        """When LLM flags values and user selects them, they get redacted."""
+        monkeypatch.setattr(
+            "sys.stdin", StringIO("Logged in as jimmy.johns on DC01\n")
+        )
+        monkeypatch.setattr(
+            "decon.cli.llm_review",
+            lambda text, model, host, quiet: "FOUND: jimmy.johns\nFOUND: DC01",
+        )
+        monkeypatch.setattr("sys.stderr", type("FakeTTY", (), {
+            "write": sys.stderr.write,
+            "flush": sys.stderr.flush,
+            "isatty": lambda self: True,
+        })())
+        tty = StringIO("all\n")
+        with patch("builtins.open", return_value=tty):
+            ret = main(["--llm"])
+        assert ret == 0
+        captured = capsys.readouterr()
+        assert "jimmy.johns" not in captured.out
+        assert "DC01" not in captured.out
+        assert "REDACTED_" in captured.out
+
+    def test_noninteractive_prints_warnings(self, monkeypatch, capsys):
+        """When stderr is not a TTY, fall back to warning-only output."""
+        monkeypatch.setattr(
+            "sys.stdin", StringIO("Logged in as jimmy.johns on DC01\n")
+        )
+        monkeypatch.setattr(
+            "decon.cli.llm_review",
+            lambda text, model, host, quiet: "FOUND: jimmy.johns\nFOUND: DC01",
+        )
+        ret = main(["--llm"])
+        assert ret == 0
+        captured = capsys.readouterr()
+        assert "FOUND: jimmy.johns" in captured.err
+        assert "jimmy.johns" in captured.out

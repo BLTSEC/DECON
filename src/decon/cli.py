@@ -25,7 +25,7 @@ from decon.output import (
     write_file,
     write_stdout,
 )
-from decon.llm import llm_review
+from decon.llm import llm_review, parse_findings
 
 
 def _split_csv(value: str) -> list[str]:
@@ -333,9 +333,20 @@ def main(argv: list[str] | None = None) -> int:
             quiet=args.quiet,
         )
         if review and "CLEAN" not in review:
-            print("LLM review flagged potential issues:", file=sys.stderr)
-            print(review, file=sys.stderr)
-            print("---", file=sys.stderr)
+            findings = parse_findings(review)
+            if findings and not args.quiet and sys.stderr.isatty():
+                selected = _prompt_llm_review(findings)
+                if selected:
+                    engine.add_custom_values(selected, case_sensitive=False)
+                    result = engine.redact(result)
+                    print(
+                        f"Redacted {len(selected)} value(s)",
+                        file=sys.stderr,
+                    )
+            elif findings and not args.quiet:
+                print("LLM review flagged potential issues:", file=sys.stderr)
+                print(review, file=sys.stderr)
+                print("---", file=sys.stderr)
 
     # Output
     _write_output(args, result)
@@ -347,6 +358,40 @@ def main(argv: list[str] | None = None) -> int:
     _print_stats(args, engine)
 
     return 0
+
+
+def _prompt_llm_review(findings: list[str]) -> list[str]:
+    """Present LLM findings interactively and return values selected for redaction."""
+    print("\nLLM flagged potential leaks:", file=sys.stderr)
+    for i, value in enumerate(findings, 1):
+        print(f"  [{i}] {value}", file=sys.stderr)
+    print(
+        "\nRedact? (1,2 / all / none) [all]: ",
+        file=sys.stderr,
+        end="",
+    )
+    sys.stderr.flush()
+
+    try:
+        with open("/dev/tty") as tty:
+            choice = tty.readline().strip()
+    except OSError:
+        return list(findings)
+
+    if not choice or choice.lower() == "all":
+        return list(findings)
+    if choice.lower() == "none":
+        return []
+
+    selected: list[str] = []
+    for token in choice.replace(",", " ").split():
+        try:
+            idx = int(token)
+            if 1 <= idx <= len(findings):
+                selected.append(findings[idx - 1])
+        except ValueError:
+            continue
+    return selected
 
 
 def _write_output(args: argparse.Namespace, result: str) -> None:
