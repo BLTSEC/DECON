@@ -230,6 +230,19 @@ decon --allow "scanme.nmap.org,10.0.0.1" pentest.log
 
 Allowlisted values are exact matches on what the regex captures.
 
+### Custom Redaction Values
+
+For engagement notes, reports, or other free-form text where sensitive values appear outside of tool output patterns, pass them explicitly:
+
+```bash
+decon --redact "Heartsbane,iknownothing,P@ss123!" engagement_notes.md
+```
+
+Values are matched case-insensitively. This is useful for:
+- Engagement notes with passwords in prose or Markdown tables
+- Standalone NT hashes not in `secretsdump` format
+- Custom secrets the regex engine can't detect from context alone
+
 ## Cross-File Consistency
 
 When sanitizing multiple files from the same engagement, export the mapping so placeholders stay consistent across all output:
@@ -605,6 +618,7 @@ Rules:
   --enable RULES        Enable rules (comma-separated)
   --disable RULES       Disable rules (comma-separated)
   --allow VALUES        Pass values through unredacted (comma-separated)
+  --redact VALUES       Extra literal values to redact (comma-separated, case-insensitive)
   --list-rules          Show all rules and status
 
 Modes:
