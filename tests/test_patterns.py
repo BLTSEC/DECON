@@ -16,6 +16,8 @@ from decon.patterns import (
     _HOSTNAME_INTERNAL,
     _IPV6,
     _CONTEXT_SECRET,
+    _KERBEROS_HASH,
+    _SMB_NETBIOS_NAME,
 )
 
 
@@ -135,6 +137,52 @@ class TestContextSecret:
     def test_password(self):
         m = _CONTEXT_SECRET.search("password=SuperSecret123!")
         assert m is not None
+
+    # BUG-3: boolean values must not be treated as secrets
+    def test_no_false_positive_true(self):
+        assert _CONTEXT_SECRET.search("Null Auth:True") is None
+
+    def test_no_false_positive_false(self):
+        assert _CONTEXT_SECRET.search("signing:False") is None
+
+    def test_no_false_positive_null(self):
+        assert _CONTEXT_SECRET.search("token:null") is None
+
+    # BUG-4: trailing ) must not be captured as part of the secret
+    def test_no_trailing_paren(self):
+        m = _CONTEXT_SECRET.search("(Password : Heartsbane)")
+        assert m is not None
+        assert m.group(2) == "Heartsbane"
+
+
+class TestKerberosHash:
+    # BUG-1: AS-REP hashes must be fully redacted
+    def test_tgs_hash(self):
+        tgs = "$krb5tgs$23$*jon.snow$NORTH.SEVENKINGDOMS.LOCAL$cifs/winterfell*$aabbccdd$eeff0011"
+        assert _KERBEROS_HASH.search(tgs) is not None
+
+    def test_asrep_hash(self):
+        asrep = "$krb5asrep$23$brandon.stark@NORTH.SEVENKINGDOMS.LOCAL:f56be23066aadd55f34904ba7252c59b"
+        m = _KERBEROS_HASH.search(asrep)
+        assert m is not None
+        assert "f56be23066aadd55f34904ba7252c59b" in m.group(0)
+
+
+class TestSmbNetbiosName:
+    # BUG-2: bare NetBIOS names in (name:HOSTNAME) context must be redacted
+    def test_matches_netbios(self):
+        line = "SMB  10.1.10.11  445  WINTERFELL  [*] Windows (name:WINTERFELL) (domain:north.sevenkingdoms.local)"
+        m = _SMB_NETBIOS_NAME.search(line)
+        assert m is not None
+        assert m.group(2) == "WINTERFELL"
+
+    def test_no_match_lowercase(self):
+        # lowercase hostnames are not NetBIOS names
+        assert _SMB_NETBIOS_NAME.search("(name:castelblack)") is None
+
+    def test_no_match_fqdn(self):
+        # FQDNs are handled by hostname_internal, not this rule
+        assert _SMB_NETBIOS_NAME.search("(name:host.corp.local)") is None
 
 
 class TestLuhn:

@@ -722,7 +722,7 @@ _CONTEXT_SECRET = re.compile(
     r"token|password|passwd|secret|auth|credential|bearer|"
     r"user\s*id|username|ntlm)"
     r"(?:\s*[:=]\s*)"
-    r"(['\"]?)([^\s'\"]{4,})\1"
+    r"(['\"]?)(?!(?:true|false|null|none)\b)([^\s'\"]{4,})(?<![).,;])\1"
 )
 
 _DOMAIN_CONTEXT = re.compile(
@@ -737,6 +737,10 @@ _RDNS_SINGLE_LABEL = re.compile(
     r"(rDNS record for [^:\n]+:\s+)"
     r"([A-Z][A-Z0-9-]{1,62})"
     r"(?=\s|$)"
+)
+
+_SMB_NETBIOS_NAME = re.compile(
+    r"(\(name:)([A-Z][A-Z0-9-]{1,14})(?=\))"
 )
 
 _CLI_FLAG_SECRET = re.compile(
@@ -825,7 +829,9 @@ _AD_DOMAIN_USER_SLASH = re.compile(
 )
 
 _KERBEROS_HASH = re.compile(
-    r"\$krb5(?:tgs|asrep)\$\d*\$[^\s:]+(?:\$[^\s]+)+"
+    r"\$krb5(?:tgs|asrep)\$\d*\$"
+    r"(?:[^\s:]+(?:\$[^\s]+)+"   # TGS: $-delimited segments
+    r"|[^\s:]+:[^\s]+)"           # AS-REP: user@DOMAIN:hexhash
 )
 
 _DCC2_HASH = re.compile(
@@ -1113,6 +1119,14 @@ def build_default_rules() -> list[Rule]:
             category="hostname",
             priority=45,
             pattern=_RDNS_SINGLE_LABEL,
+            placeholder_template="HOST_{n:02d}",
+            apply_fn=_rdns_hostname_apply,
+        ),
+        Rule(
+            name="smb_netbios_name",
+            category="hostname",
+            priority=46,
+            pattern=_SMB_NETBIOS_NAME,
             placeholder_template="HOST_{n:02d}",
             apply_fn=_rdns_hostname_apply,
         ),
