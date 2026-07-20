@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import re
 from dataclasses import dataclass
 from typing import Callable
@@ -19,6 +20,43 @@ ApplyFn = Callable[
     ],
     str,
 ]
+
+_TYPED_PLACEHOLDER = re.compile(
+    r"(?:"
+    r"\[(?:(?:IPV4|IPV6|MAC|EMAIL|PHONE|SECRET|HOST|HOST_SHORT|DOMAIN|CIDR)"
+    r"_REDACTED|CUSTOM_(?:[A-Z0-9]+_)*REDACTED)_\d+\](?:/\d{1,3})?"
+    r"|(?:PRIVATE_KEY_REDACTED|KERBEROS_HASH|SAM_DUMP|NTLMV2_HASH|"
+    r"KERBEROS_KEY|JWT_REDACTED|API_KEY|DCC2_HASH|DPAPI_KEY|"
+    r"MACHINE_HEX_PW|NTLM_HASH|SID_REDACTED|SSN_REDACTED|"
+    r"CC_REDACTED|SPN|DOMAIN_USER|URL_REDACTED|UNC_PATH)_\d+"
+    r")"
+)
+
+
+def _is_typed_placeholder(value: str) -> bool:
+    """Return whether a value belongs to DECON's explicit placeholder namespace."""
+    return bool(_TYPED_PLACEHOLDER.fullmatch(value))
+
+
+def _allocate_placeholder(
+    category: str,
+    template: str,
+    counters: dict[str, int],
+    placeholder_values: set[str],
+) -> str:
+    """Allocate the next unused placeholder for a category."""
+    n = counters.get(category, 0) + 1
+    attempted: set[str] = set()
+    while True:
+        placeholder = template.format(n=n)
+        if placeholder in attempted:
+            raise ValueError("placeholder template must produce a unique value for {n}")
+        attempted.add(placeholder)
+        if placeholder not in placeholder_values:
+            counters[category] = n
+            placeholder_values.add(placeholder)
+            return placeholder
+        n += 1
 
 
 @dataclass
@@ -56,22 +94,24 @@ class Rule:
             if self.validator and not self.validator(value):
                 return value
 
-            if value in placeholder_values:
+            if value in placeholder_values or _is_typed_placeholder(value):
                 return value
 
             if mapping_key in mapping:
                 placeholder = mapping[mapping_key]
+                if placeholder == mapping_key:
+                    return value
                 if applied is not None:
                     applied.append((self.category, value, placeholder))
                 return placeholder
 
-            cat = self.category
-            n = counters.get(cat, 0) + 1
-            counters[cat] = n
-
-            placeholder = self.placeholder_template.format(n=n)
+            placeholder = _allocate_placeholder(
+                self.category,
+                self.placeholder_template,
+                counters,
+                placeholder_values,
+            )
             mapping[mapping_key] = placeholder
-            placeholder_values.add(placeholder)
             if applied is not None:
                 applied.append((self.category, value, placeholder))
             return placeholder
@@ -103,18 +143,21 @@ def _group_replace_apply(
     def _replace(match: re.Match[str]) -> str:
         value = match.group(group)
         mapping_key = rule.mapping_key_fn(value) if rule.mapping_key_fn else value
-        if value in placeholder_values:
+        if value in placeholder_values or _is_typed_placeholder(value):
             return match.group(0)
 
         if mapping_key in mapping:
             placeholder = mapping[mapping_key]
+            if placeholder == mapping_key:
+                return match.group(0)
         else:
-            cat = rule.category
-            n = counters.get(cat, 0) + 1
-            counters[cat] = n
-            placeholder = rule.placeholder_template.format(n=n)
+            placeholder = _allocate_placeholder(
+                rule.category,
+                rule.placeholder_template,
+                counters,
+                placeholder_values,
+            )
             mapping[mapping_key] = placeholder
-            placeholder_values.add(placeholder)
 
         if applied is not None:
             applied.append((rule.category, value, placeholder))
@@ -141,12 +184,16 @@ def _assign_placeholder(
 
     if mapping_key in mapping:
         placeholder = mapping[mapping_key]
+        if placeholder == mapping_key:
+            return value
     else:
-        n = counters.get(category, 0) + 1
-        counters[category] = n
-        placeholder = template.format(n=n)
+        placeholder = _allocate_placeholder(
+            category,
+            template,
+            counters,
+            placeholder_values,
+        )
         mapping[mapping_key] = placeholder
-        placeholder_values.add(placeholder)
 
     if applied is not None:
         applied.append((category, value, placeholder))
@@ -166,12 +213,16 @@ def _assign_domain_placeholder(
 
     if mapping_key in mapping:
         placeholder = mapping[mapping_key]
+        if placeholder == mapping_key:
+            return value
     else:
-        n = counters.get("domain", 0) + 1
-        counters["domain"] = n
-        placeholder = "example.internal" if n == 1 else f"example{n:02d}.internal"
+        placeholder = _allocate_placeholder(
+            "domain",
+            "[DOMAIN_REDACTED_{n:04d}]",
+            counters,
+            placeholder_values,
+        )
         mapping[mapping_key] = placeholder
-        placeholder_values.add(placeholder)
 
     if applied is not None:
         applied.append(("domain", value, placeholder))
@@ -201,12 +252,13 @@ def _cidr_apply(
             return placeholder
 
         _ip, mask = value.rsplit("/", 1)
-        cat = rule.category
-        n = counters.get(cat, 0) + 1
-        counters[cat] = n
-        placeholder = f"10.0.0.{n}/{mask}"
+        placeholder = _allocate_placeholder(
+            rule.category,
+            f"[CIDR_REDACTED_{{n:04d}}]/{mask}",
+            counters,
+            placeholder_values,
+        )
         mapping[value] = placeholder
-        placeholder_values.add(placeholder)
         if applied is not None:
             applied.append((rule.category, value, placeholder))
         return placeholder
@@ -226,7 +278,7 @@ def _domain_context_apply(
 
     def _replace(match: re.Match[str]) -> str:
         value = match.group(2)
-        if value in placeholder_values:
+        if value in placeholder_values or _is_typed_placeholder(value):
             return match.group(0)
 
         normalized, suffix = _split_domain_context_value(value)
@@ -258,6 +310,50 @@ def _domain_context_apply(
     return rule.pattern.sub(_replace, text)
 
 
+def _context_secret_apply(
+    rule: Rule,
+    text: str,
+    mapping: dict[str, str],
+    counters: dict[str, int],
+    applied: list[tuple[str, str, str]] | None = None,
+) -> str:
+    """Redact quoted or unquoted context-anchored secret values."""
+    placeholder_values = set(mapping.values())
+    safe_literals = {"true", "false", "null", "none"}
+
+    def _replace(match: re.Match[str]) -> str:
+        group = 2
+        value = match.group(group)
+
+        if not value or value.casefold() in safe_literals:
+            return match.group(0)
+        if (
+            value.startswith("[")
+            and match.end() < len(match.string)
+            and match.string[match.end()] == "]"
+            and _is_typed_placeholder(value + "]")
+        ):
+            return match.group(0)
+        if value in placeholder_values or _is_typed_placeholder(value):
+            return match.group(0)
+
+        placeholder = _assign_placeholder(
+            category=rule.category,
+            template=rule.placeholder_template,
+            value=value,
+            mapping=mapping,
+            counters=counters,
+            placeholder_values=placeholder_values,
+            applied=applied,
+        )
+        full = match.group(0)
+        start = full[: match.start(group) - match.start(0)]
+        end = full[match.end(group) - match.start(0) :]
+        return start + placeholder + end
+
+    return rule.pattern.sub(_replace, text)
+
+
 def _smb_user_pass_apply(
     rule: Rule,
     text: str,
@@ -273,20 +369,27 @@ def _smb_user_pass_apply(
         password = match.group(2)
         for value in (user, password):
             mapping_key = rule.mapping_key_fn(value) if rule.mapping_key_fn else value
-            if mapping_key not in mapping and value not in placeholder_values:
-                cat = rule.category
-                n = counters.get(cat, 0) + 1
-                counters[cat] = n
-                placeholder = rule.placeholder_template.format(n=n)
+            if (
+                mapping_key not in mapping
+                and value not in placeholder_values
+                and not _is_typed_placeholder(value)
+            ):
+                placeholder = _allocate_placeholder(
+                    rule.category,
+                    rule.placeholder_template,
+                    counters,
+                    placeholder_values,
+                )
                 mapping[mapping_key] = placeholder
-                placeholder_values.add(placeholder)
         user_key = rule.mapping_key_fn(user) if rule.mapping_key_fn else user
         pass_key = rule.mapping_key_fn(password) if rule.mapping_key_fn else password
         user_ph = mapping.get(user_key, user)
         pass_ph = mapping.get(pass_key, password)
         if applied is not None:
-            applied.append((rule.category, user, user_ph))
-            applied.append((rule.category, password, pass_ph))
+            if user_ph != user:
+                applied.append((rule.category, user, user_ph))
+            if pass_ph != password:
+                applied.append((rule.category, password, pass_ph))
         prefix = match.group(0)[: match.start(1) - match.start(0)]
         return prefix + user_ph + "%" + pass_ph
 
@@ -313,31 +416,48 @@ def _cli_flag_apply(
 
     def _replace(match: re.Match[str]) -> str:
         flag = match.group(1)
-        value = match.group(3)
+        group = next(
+            group_number
+            for group_number in (2, 3, 4)
+            if match.group(group_number) is not None
+        )
+        value = match.group(group)
         mapping_key = rule.mapping_key_fn(value) if rule.mapping_key_fn else value
         # Skip file paths, template placeholders, and other non-secret values
         if _CLI_FLAG_SKIP_RE.match(value):
             return match.group(0)
-        if flag == "-p" and _looks_like_port_spec(value) and _is_port_scan_command(text, match.start(0)):
+        if flag == "-U" and "%" in value and all(
+            part in placeholder_values or _is_typed_placeholder(part)
+            for part in value.split("%", 1)
+        ):
             return match.group(0)
-        if value in placeholder_values:
+        if (
+            flag == "-p"
+            and _looks_like_port_spec(value)
+            and _is_port_scan_command(text, match.start(0))
+        ):
+            return match.group(0)
+        if value in placeholder_values or _is_typed_placeholder(value):
             return match.group(0)
 
         if mapping_key in mapping:
             placeholder = mapping[mapping_key]
+            if placeholder == mapping_key:
+                return match.group(0)
         else:
-            cat = rule.category
-            n = counters.get(cat, 0) + 1
-            counters[cat] = n
-            placeholder = rule.placeholder_template.format(n=n)
+            placeholder = _allocate_placeholder(
+                rule.category,
+                rule.placeholder_template,
+                counters,
+                placeholder_values,
+            )
             mapping[mapping_key] = placeholder
-            placeholder_values.add(placeholder)
 
         if applied is not None:
             applied.append((rule.category, value, placeholder))
         full = match.group(0)
-        start = full[: match.start(3) - match.start(0)]
-        end = full[match.end(3) - match.start(0) :]
+        start = full[: match.start(group) - match.start(0)]
+        end = full[match.end(group) - match.start(0) :]
         return start + placeholder + end
 
     return rule.pattern.sub(_replace, text)
@@ -366,17 +486,19 @@ def _url_apply(
 
         if mapping_key in mapping:
             placeholder = mapping[mapping_key]
+            if placeholder == mapping_key:
+                return value
             if applied is not None:
                 applied.append((rule.category, value, placeholder))
             return placeholder
 
-        cat = rule.category
-        n = counters.get(cat, 0) + 1
-        counters[cat] = n
-
-        placeholder = rule.placeholder_template.format(n=n)
+        placeholder = _allocate_placeholder(
+            rule.category,
+            rule.placeholder_template,
+            counters,
+            placeholder_values,
+        )
         mapping[mapping_key] = placeholder
-        placeholder_values.add(placeholder)
         if applied is not None:
             applied.append((rule.category, value, placeholder))
         return placeholder
@@ -458,6 +580,19 @@ def _valid_ipv4(value: str) -> bool:
     return True
 
 
+def _canonical_ipv6(value: str) -> str:
+    """Return a stable key for equivalent IPv6 spellings."""
+    address, separator, zone = value.partition("%")
+    canonical = ipaddress.IPv6Address(address).compressed.casefold()
+    # Zone identifiers can be case-sensitive interface names on Unix systems.
+    return canonical + (separator + zone if separator else "")
+
+
+def _canonical_mac(value: str) -> str:
+    """Return twelve lowercase hexadecimal characters for a MAC address."""
+    return re.sub(r"[:.-]", "", value).casefold()
+
+
 def _luhn_check(value: str) -> bool:
     """Luhn algorithm for credit card validation."""
     digits = [int(d) for d in value if d.isdigit()]
@@ -528,7 +663,10 @@ def _valid_domain_user(value: str) -> bool:
 _FQDN_LIKE = re.compile(
     r"(?i)^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
 )
-_HOST_PLACEHOLDER = re.compile(r"HOST_\d{2}(?:\.example\.internal)?")
+_HOST_PLACEHOLDER = re.compile(
+    r"(?:\[HOST_REDACTED_\d+\]|\[HOST_SHORT_REDACTED_\d+\]|"
+    r"HOST_\d+(?:\.example\.internal)?)"
+)
 
 
 def _normalize_domain_context_value(value: str) -> str:
@@ -573,6 +711,10 @@ def _hostname_first_label(value: str) -> str | None:
 
 def _short_hostname_placeholder(value: str) -> str:
     """Return the short HOST_XX form for a hostname placeholder."""
+    if value.startswith("[HOST_REDACTED_"):
+        return value.replace("[HOST_REDACTED_", "[HOST_SHORT_REDACTED_", 1)
+    if value.startswith("[HOST_SHORT_REDACTED_"):
+        return value
     if value.endswith(".example.internal"):
         return value.split(".", 1)[0]
     return value
@@ -713,7 +855,8 @@ _IPV6 = re.compile(
     r"|[0-9a-fA-F]{1,4}:(?::[0-9a-fA-F]{1,4}){6}"
     r"|::(?:[0-9a-fA-F]{1,4}:){0,6}[0-9a-fA-F]{1,4}"
     r")"
-    r"(?![:\w])"
+    r"(?![:\w])",
+    re.IGNORECASE,
 )
 
 _MAC = re.compile(
@@ -767,7 +910,10 @@ _CONTEXT_SECRET = re.compile(
     r"token|password|passwd|secret|auth|credential|bearer|"
     r"user\s*id|username|ntlm)"
     r"(?:\s*[:=]\s*)"
-    r"(['\"]?)(?!(?:true|false|null|none)\b)([^\s'\"]{4,})(?<![).,;])\1"
+    r"(['\"]?)"
+    r"(?!(?:true|false|null|none)\1(?=$|[\s,)\]}]))"
+    r"(.+?)\1"
+    r"(?=$|[\s,)\]}])"
 )
 
 _DOMAIN_CONTEXT = re.compile(
@@ -877,7 +1023,7 @@ _CLI_FLAG_SECRET = re.compile(
     r"(-p|-P|-pw|-w|-W|--password|--pw|-H|--hash|--hashes"
     r"|-u|-l|--user|--login|--username|-U)"
     r"\s+"
-    r"(['\"]?)([^\s'\"]{3,})\2"
+    r'(?:"([^"\r\n]+)"|\'([^\'\r\n]+)\'|([^\s\'\"]+))'
     r"(?=\s|$)"
 )
 
@@ -885,7 +1031,6 @@ _CLI_FLAG_SECRET = re.compile(
 _CLI_FLAG_SKIP_RE = re.compile(
     r"^(?:"
     r"[/<]"                       # starts with / (path) or < (template placeholder)
-    r"|.*\.\w{2,4}$"              # ends with file extension (.txt, .list, etc.)
     r"|None\b"                    # Python None in output
     r"|-"                         # another flag
     r"|%\{"                       # curl -w format string (%{http_code}, etc.)
@@ -908,7 +1053,8 @@ _HOSTNAME_INTERNAL = re.compile(
     r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?"
     r"\.(?:corp|internal|local|intra|priv|lan|htb|lab)"
     r"(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*"
-    r"(?![.\w])"
+    r"(?![.\w])",
+    re.IGNORECASE,
 )
 
 _PRIVATE_KEY = re.compile(
@@ -1103,7 +1249,7 @@ def build_default_rules() -> list[Rule]:
             category="secret",
             priority=15,
             pattern=_DOMAIN_CONTEXT,
-            placeholder_template="SECRET_{n:02d}",
+            placeholder_template="[SECRET_REDACTED_{n:04d}]",
             apply_fn=_domain_context_apply,
         ),
         Rule(
@@ -1111,15 +1257,23 @@ def build_default_rules() -> list[Rule]:
             category="secret",
             priority=15,
             pattern=_CONTEXT_SECRET,
-            placeholder_template="SECRET_{n:02d}",
-            apply_fn=_apply_group(2),
+            placeholder_template="[SECRET_REDACTED_{n:04d}]",
+            apply_fn=_context_secret_apply,
+        ),
+        Rule(
+            name="smb_user_pass",
+            category="secret",
+            priority=16,
+            pattern=_SMB_USER_PASS,
+            placeholder_template="[SECRET_REDACTED_{n:04d}]",
+            apply_fn=_smb_user_pass_apply,
         ),
         Rule(
             name="cli_flag_secret",
             category="secret",
             priority=16,
             pattern=_CLI_FLAG_SECRET,
-            placeholder_template="SECRET_{n:02d}",
+            placeholder_template="[SECRET_REDACTED_{n:04d}]",
             apply_fn=_cli_flag_apply,
         ),
         Rule(
@@ -1127,16 +1281,8 @@ def build_default_rules() -> list[Rule]:
             category="secret",
             priority=16,
             pattern=_SLASH_PARAM_SECRET,
-            placeholder_template="SECRET_{n:02d}",
+            placeholder_template="[SECRET_REDACTED_{n:04d}]",
             apply_fn=_apply_group(1),
-        ),
-        Rule(
-            name="smb_user_pass",
-            category="secret",
-            priority=16,
-            pattern=_SMB_USER_PASS,
-            placeholder_template="SECRET_{n:02d}",
-            apply_fn=_smb_user_pass_apply,
         ),
         Rule(
             name="windows_sid",
@@ -1196,14 +1342,14 @@ def build_default_rules() -> list[Rule]:
             category="email",
             priority=30,
             pattern=_EMAIL,
-            placeholder_template="user_{n:02d}@example.com",
+            placeholder_template="[EMAIL_REDACTED_{n:04d}]",
         ),
         Rule(
             name="phone",
             category="phone",
             priority=30,
             pattern=_PHONE,
-            placeholder_template="(555) 555-{n:04d}",
+            placeholder_template="[PHONE_REDACTED_{n:04d}]",
         ),
         Rule(
             name="unc_path",
@@ -1217,7 +1363,7 @@ def build_default_rules() -> list[Rule]:
             category="secret",
             priority=36,
             pattern=_LINUX_HOME_PATH,
-            placeholder_template="SECRET_{n:02d}",
+            placeholder_template="[SECRET_REDACTED_{n:04d}]",
             apply_fn=_apply_group(1),
         ),
         Rule(
@@ -1225,7 +1371,7 @@ def build_default_rules() -> list[Rule]:
             category="secret",
             priority=36,
             pattern=_WINDOWS_USER_PATH,
-            placeholder_template="SECRET_{n:02d}",
+            placeholder_template="[SECRET_REDACTED_{n:04d}]",
             apply_fn=_apply_group(1),
         ),
         Rule(
@@ -1233,7 +1379,7 @@ def build_default_rules() -> list[Rule]:
             category="cidr",
             priority=39,
             pattern=_CIDR,
-            placeholder_template="10.0.0.{n}/24",
+            placeholder_template="[CIDR_REDACTED_{n:04d}]/24",
             apply_fn=_cidr_apply,
         ),
         Rule(
@@ -1241,7 +1387,7 @@ def build_default_rules() -> list[Rule]:
             category="ipv4",
             priority=40,
             pattern=_IPV4,
-            placeholder_template="10.0.0.{n}",
+            placeholder_template="[IPV4_REDACTED_{n:04d}]",
             validator=_valid_ipv4,
         ),
         Rule(
@@ -1249,28 +1395,31 @@ def build_default_rules() -> list[Rule]:
             category="ipv6",
             priority=40,
             pattern=_IPV6,
-            placeholder_template="fd00::{n:x}",
+            placeholder_template="[IPV6_REDACTED_{n:04d}]",
+            mapping_key_fn=_canonical_ipv6,
         ),
         Rule(
             name="mac",
             category="mac",
             priority=40,
             pattern=_MAC,
-            placeholder_template="00:DE:AD:00:00:{n:02X}",
+            placeholder_template="[MAC_REDACTED_{n:04d}]",
+            mapping_key_fn=_canonical_mac,
         ),
         Rule(
             name="hostname_internal",
             category="hostname",
             priority=44,
             pattern=_HOSTNAME_INTERNAL,
-            placeholder_template="HOST_{n:02d}.example.internal",
+            placeholder_template="[HOST_REDACTED_{n:04d}]",
+            mapping_key_fn=str.casefold,
         ),
         Rule(
             name="rdns_single_label",
             category="hostname",
             priority=45,
             pattern=_RDNS_SINGLE_LABEL,
-            placeholder_template="HOST_{n:02d}",
+            placeholder_template="[HOST_SHORT_REDACTED_{n:04d}]",
             apply_fn=_rdns_hostname_apply,
         ),
         Rule(
@@ -1278,7 +1427,7 @@ def build_default_rules() -> list[Rule]:
             category="hostname",
             priority=46,
             pattern=_SMB_NETBIOS_NAME,
-            placeholder_template="HOST_{n:02d}",
+            placeholder_template="[HOST_SHORT_REDACTED_{n:04d}]",
             apply_fn=_rdns_hostname_apply,
         ),
         Rule(
@@ -1286,7 +1435,7 @@ def build_default_rules() -> list[Rule]:
             category="domain",
             priority=47,
             pattern=_LDAP_DN_DOMAIN,
-            placeholder_template="example.internal",
+            placeholder_template="[DOMAIN_REDACTED_{n:04d}]",
             apply_fn=_ldap_dn_domain_apply,
         ),
         Rule(
@@ -1310,7 +1459,7 @@ def build_default_rules() -> list[Rule]:
             category="secret",
             priority=49,
             pattern=_NETEXEC_SPRAY_PASSWORD,
-            placeholder_template="SECRET_{n:02d}",
+            placeholder_template="[SECRET_REDACTED_{n:04d}]",
             apply_fn=_apply_group(2),
         ),
         Rule(
@@ -1334,7 +1483,7 @@ def build_default_rules() -> list[Rule]:
             category="hostname",
             priority=49,
             pattern=_NMAP_NTLM_FIELD,
-            placeholder_template="HOST_{n:02d}",
+            placeholder_template="[HOST_SHORT_REDACTED_{n:04d}]",
             apply_fn=_apply_group(2),
         ),
         Rule(

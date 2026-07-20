@@ -4,9 +4,12 @@ import tempfile
 import os
 from pathlib import Path
 
+import pytest
+
 from decon.config import (
     ConfigError,
     apply_config_to_engine,
+    init_config,
     load_config,
     resolve_profile,
 )
@@ -30,6 +33,12 @@ class TestLoadConfig:
             assert config["llm"]["enabled"] is True
         finally:
             os.unlink(path)
+
+    def test_init_config_is_owner_only(self, tmp_path, monkeypatch):
+        path = tmp_path / "config" / "decon.toml"
+        monkeypatch.setattr("decon.config.DEFAULT_CONFIG_PATH", path)
+        assert init_config() == path
+        assert os.stat(path).st_mode & 0o777 == 0o600
 
     def test_invalid_toml_raises_config_error(self):
         with tempfile.NamedTemporaryFile(
@@ -115,3 +124,65 @@ class TestApplyConfig:
             assert False, "Expected ConfigError"
         except ConfigError:
             pass
+
+    def test_default_profile_applies_custom_values_extra(self):
+        config = {
+            "default_profile": "client-share",
+            "profiles": {
+                "client-share": {"custom_values_extra": ["Nighthawk"]}
+            },
+        }
+        engine = RedactionEngine()
+        apply_config_to_engine(engine, config)
+        assert "Nighthawk" not in engine.redact("Project Nighthawk")
+
+    def test_unknown_profile_is_rejected(self):
+        engine = RedactionEngine()
+        try:
+            apply_config_to_engine(engine, {}, "typo")
+            assert False, "Expected ConfigError"
+        except ConfigError as e:
+            assert "Unknown profile" in str(e)
+
+    @pytest.mark.parametrize(
+        ("config", "message"),
+        [
+            ({"rules": {"ipv4": "false"}}, "must be true or false"),
+            ({"rules": {"ipvv4": False}}, "Unknown rule"),
+            ({"custom": {"values": "secret"}}, "array of strings"),
+            ({"custom": {"allowlist": [""]}}, "non-empty strings"),
+            ({"custom": {"target_domains": [1]}}, "non-empty strings"),
+            ({"llm": {"enabled": "yes"}}, "llm.enabled"),
+            ({"llm": {"host": ""}}, "llm.host"),
+        ],
+    )
+    def test_invalid_config_types_are_rejected(self, config, message):
+        with pytest.raises(ConfigError, match=message):
+            apply_config_to_engine(RedactionEngine(), config)
+
+    def test_custom_pattern_must_not_match_empty_text(self):
+        config = {"custom": {"patterns": [{"pattern": r"x*"}]}}
+        with pytest.raises(ConfigError, match="must not match empty text"):
+            apply_config_to_engine(RedactionEngine(), config)
+
+    def test_custom_pattern_replacement_is_validated(self):
+        config = {
+            "custom": {
+                "patterns": [
+                    {"pattern": r"secret", "replacement": "[CUSTOM_{missing}]"}
+                ]
+            }
+        }
+        with pytest.raises(ConfigError, match="Invalid replacement"):
+            apply_config_to_engine(RedactionEngine(), config)
+
+    def test_custom_pattern_replacement_must_vary(self):
+        config = {
+            "custom": {
+                "patterns": [
+                    {"pattern": r"secret", "replacement": "[CUSTOM_REDACTED]"}
+                ]
+            }
+        }
+        with pytest.raises(ConfigError, match="Invalid replacement"):
+            apply_config_to_engine(RedactionEngine(), config)
