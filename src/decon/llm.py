@@ -10,8 +10,9 @@ import urllib.error
 
 from decon.patterns import get_placeholder_templates
 
-# Maximum characters to send to the LLM (avoids context overflow on large files)
+# Maximum characters to send in a single LLM request.
 MAX_LLM_CHARS = 12000
+LLM_CHUNK_OVERLAP = 256
 
 
 def _build_placeholder_re() -> re.Pattern[str]:
@@ -33,7 +34,9 @@ def _build_placeholder_re() -> re.Pattern[str]:
         ), escaped)
         fragments.append(escaped)
 
-    # Also match custom value placeholders (from add_custom_values)
+    # Also match default and documented custom placeholder formats.
+    fragments.append(r"\[CUSTOM_[A-Z0-9_]*REDACTED_\d+\]")
+    # Legacy custom value placeholders remain safe for imported/older output.
     fragments.append(r"REDACTED_\d+")
     # Domain-context FQDN placeholders are parent-domain style.
     fragments.append(r"example(?:\d+)?\.internal\d*")
@@ -42,11 +45,17 @@ def _build_placeholder_re() -> re.Pattern[str]:
 
 
 _PLACEHOLDER_RE = _build_placeholder_re()
+_FINDING_LINE_RE = re.compile(
+    r"^\s*(?:[-*]\s*)?FOUND\s*:\s*(.*?)\s*$",
+    re.IGNORECASE,
+)
 
 
 REVIEW_PROMPT = """\
-This is redacted pentest output. Placeholders (10.0.0.X, fd00::X, \
-user_XX@example.com, HOST_XX.example.internal, HOST_XX, example.internal, SECRET_XX, \
+This is redacted pentest output. Placeholders ([IPV4_REDACTED_XXXX], \
+[IPV6_REDACTED_XXXX], [MAC_REDACTED_XXXX], [EMAIL_REDACTED_XXXX], \
+[HOST_REDACTED_XXXX], [HOST_SHORT_REDACTED_XXXX], [DOMAIN_REDACTED_XXXX], \
+[SECRET_REDACTED_XXXX], [CUSTOM_REDACTED_XXXX], \
 URL_REDACTED_XX, NTLM_HASH_XX, NTLMV2_HASH_XX, SAM_DUMP_XX, \
 KERBEROS_KEY_XX, KERBEROS_HASH_XX, DCC2_HASH_XX, DPAPI_KEY_XX, \
 SID_REDACTED_XX, DOMAIN_USER_XX, UNC_PATH_XX, \
@@ -199,6 +208,12 @@ def _normalize_finding(value: str) -> str:
     value = re.sub(r"^(\d+\.\d+\.\d+\.\d+):\d+$", r"\1", value)
     # Strip protocol prefix: "http-get://10.0.0.1:81/" -> "10.0.0.1"
     value = re.sub(r"^[a-zA-Z][-a-zA-Z0-9+.]*://", "", value)
+    # Strip port/path suffixes appended to typed DECON placeholders.
+    value = re.sub(
+        r"^(\[[A-Z][A-Z0-9_]*\])(?::\d+)?(?:/.*)?$",
+        r"\1",
+        value,
+    )
     # Strip trailing path/port after protocol removal: "10.0.0.1:81/" -> "10.0.0.1"
     value = re.sub(r"^(\d+\.\d+\.\d+\.\d+)[:/].*$", r"\1", value)
     return value.strip().rstrip(".,;:!?")
@@ -209,22 +224,24 @@ def _filter_placeholder_findings(response: str) -> str:
     lines = []
     seen_findings: set[str] = set()
     for line in response.splitlines():
-        if line.startswith("FOUND:"):
-            value = line[len("FOUND:"):].strip().strip('"').strip("'").strip()
-            if not value:
-                continue
-            normalized = _normalize_finding(value)
-            if _PLACEHOLDER_RE.match(normalized) or _PLACEHOLDER_RE.match(value):
-                continue
-            if _is_safe_software(normalized) or _is_safe_software(value):
-                continue
-            if _is_safe_artifact(normalized) or _is_safe_artifact(value):
-                continue
-            # Dedup repeated findings
-            if normalized.lower() in seen_findings:
-                continue
-            seen_findings.add(normalized.lower())
-        lines.append(line)
+        match = _FINDING_LINE_RE.match(line)
+        if not match:
+            continue
+        value = match.group(1).strip().strip('"').strip("'").strip()
+        if not value:
+            continue
+        normalized = _normalize_finding(value)
+        if _PLACEHOLDER_RE.match(normalized) or _PLACEHOLDER_RE.match(value):
+            continue
+        if _is_safe_software(normalized) or _is_safe_software(value):
+            continue
+        if _is_safe_artifact(normalized) or _is_safe_artifact(value):
+            continue
+        # Dedup repeated findings, including across overlapping LLM chunks.
+        if normalized.lower() in seen_findings:
+            continue
+        seen_findings.add(normalized.lower())
+        lines.append(f"FOUND: {value}")
     filtered = "\n".join(lines).strip()
     if not any(l.startswith("FOUND:") for l in lines):
         return "CLEAN"
@@ -236,42 +253,46 @@ def parse_findings(response: str) -> list[str]:
     values: list[str] = []
     seen: set[str] = set()
     for line in response.splitlines():
-        if line.startswith("FOUND:"):
-            raw = line[len("FOUND:"):].strip().strip('"').strip("'").strip()
-            if not raw:
-                continue
-            value = _normalize_finding(raw)
-            if value and value.lower() not in seen:
-                seen.add(value.lower())
-                values.append(value)
+        match = _FINDING_LINE_RE.match(line)
+        if not match:
+            continue
+        raw = match.group(1).strip().strip('"').strip("'").strip()
+        if not raw:
+            continue
+        value = _normalize_finding(raw)
+        if value and value.lower() not in seen:
+            seen.add(value.lower())
+            values.append(value)
     return values
 
 
-def llm_review(
-    text: str,
-    model: str = "qwen3.5:9b",
-    host: str = "http://localhost:11434",
-    quiet: bool = False,
-) -> str | None:
-    """Send redacted text to Ollama for review.
+def _chunk_review_text(text: str) -> list[str]:
+    """Split text into overlapping, line-aware chunks for complete review."""
+    if len(text) <= MAX_LLM_CHARS:
+        return [text]
 
-    Returns the LLM's response, or None if Ollama is unavailable.
-    """
-    # Truncate to avoid context overflow
-    review_text = text
-    if len(text) > MAX_LLM_CHARS:
-        review_text = text[:MAX_LLM_CHARS] + "\n\n[... truncated ...]"
-        if not quiet:
-            print(
-                f"Warning: text truncated to {MAX_LLM_CHARS} chars for LLM review",
-                file=sys.stderr,
-            )
+    chunks: list[str] = []
+    start = 0
+    while start < len(text):
+        end = min(start + MAX_LLM_CHARS, len(text))
+        if end < len(text):
+            line_end = text.rfind("\n", start + 1, end)
+            if line_end > start:
+                end = line_end + 1
+        chunks.append(text[start:end])
+        if end == len(text):
+            break
+        start = max(end - LLM_CHUNK_OVERLAP, start + 1)
+    return chunks
 
-    url = f"{host}/api/chat"
+
+def _ollama_request(text: str, model: str, host: str) -> str:
+    """Send one review chunk to Ollama and return its raw response text."""
+    url = f"{host.rstrip('/')}/api/chat"
     payload = json.dumps({
         "model": model,
         "messages": [
-            {"role": "user", "content": REVIEW_PROMPT.format(text=review_text)},
+            {"role": "user", "content": REVIEW_PROMPT.format(text=text)},
         ],
         "stream": False,
         "think": False,
@@ -286,12 +307,34 @@ def llm_review(
         data=payload,
         headers={"Content-Type": "application/json"},
     )
+    with urllib.request.urlopen(req, timeout=300) as resp:
+        data = json.loads(resp.read().decode())
+    return data.get("message", {}).get("content", "")
+
+
+def llm_review(
+    text: str,
+    model: str = "qwen3.5:9b",
+    host: str = "http://localhost:11434",
+    quiet: bool = False,
+) -> str | None:
+    """Send redacted text to Ollama for review.
+
+    Returns the LLM's response, or None if Ollama is unavailable.
+    """
+    chunks = _chunk_review_text(text)
+    if len(chunks) > 1:
+        if not quiet:
+            print(
+                f"Reviewing large input in {len(chunks)} LLM chunks",
+                file=sys.stderr,
+            )
 
     try:
-        with urllib.request.urlopen(req, timeout=300) as resp:
-            data = json.loads(resp.read().decode())
-            raw = data.get("message", {}).get("content", "")
-            return _filter_placeholder_findings(raw)
+        raw_responses = [
+            _ollama_request(chunk, model=model, host=host) for chunk in chunks
+        ]
+        return _filter_placeholder_findings("\n".join(raw_responses))
     except urllib.error.URLError as e:
         if not quiet:
             print(

@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from decon.patterns import Rule, build_default_rules
 
 AppliedRedaction = tuple[str, str, str]
-_HOST_PLACEHOLDER = re.compile(r"HOST_(\d{2})(?:\.example\.internal)?")
+_HOST_PLACEHOLDER = re.compile(
+    r"(?<![\w])(?:\[HOST_REDACTED_(\d+)\]|\[HOST_SHORT_REDACTED_(\d+)\]|"
+    r"HOST_(\d+)(?:\.example\.internal)?)(?![.\w])"
+)
 # RFC 2849 LDIF line folding: continuation lines start with a single space.
 _LDAP_FOLD = re.compile(r"\n (?=\S)")
 _LDAP_MARKER = re.compile(r"(?:^|\n)(?:dn|memberOf|ref): ", re.MULTILINE)
@@ -48,6 +54,7 @@ class RedactionEngine:
 
     rules: list[Rule] = field(default_factory=build_default_rules)
     mapping: dict[str, str] = field(default_factory=dict)
+    reverse_mapping: dict[str, str] = field(default_factory=dict)
     counters: dict[str, int] = field(default_factory=dict)
     allowlist: set[str] = field(default_factory=set)
 
@@ -82,6 +89,9 @@ class RedactionEngine:
         text = self._retrospective_replace(text, applied)
         if not existing_hostname_placeholders:
             text, applied = self._normalize_hostname_placeholders(text, applied)
+        for _category, original, placeholder in applied:
+            if original != placeholder:
+                self.reverse_mapping.setdefault(placeholder, original)
         return RedactionReport(text=text, applied=applied)
 
     def _retrospective_replace(
@@ -99,9 +109,13 @@ class RedactionEngine:
         characters) mapped to HOST_, DOMAIN_USER_, or example* placeholders
         to minimize false positive risk.
         """
-        placeholder_values = set(self.mapping.values())
         # Collect safe candidates: identifiers already mapped by pattern rules
-        _safe_prefixes = ("HOST_", "DOMAIN_USER_", "example")
+        _safe_prefixes = (
+            "[HOST_",
+            "HOST_",  # legacy mappings
+            "DOMAIN_USER_",
+            "[DOMAIN_REDACTED_",
+        )
         candidates: list[tuple[str, str]] = []
         for original, placeholder in self.mapping.items():
             if original == placeholder:  # allowlist identity
@@ -113,7 +127,9 @@ class RedactionEngine:
                 continue
             # Allow FQDNs up to 80 chars (hostname.subdomain.domain.tld patterns)
             # but cap other identifiers at 30 to skip hashes and long values
-            is_fqdn = "." in original and placeholder.startswith(("HOST_", "example"))
+            is_fqdn = "." in original and placeholder.startswith(
+                ("[HOST_", "HOST_", "[DOMAIN_REDACTED_")
+            )
             if len(original) > 80 or (len(original) > 30 and not is_fqdn):
                 continue
             if not re.fullmatch(r"[a-zA-Z0-9._$-]+", original):
@@ -130,7 +146,7 @@ class RedactionEngine:
             # that allows '.' before the match — catches subdomains like
             # _msdcs.sevenkingdoms.local where the domain appears after a dot.
             # Hostname/user entries use strict boundaries to avoid partial matches.
-            if placeholder.startswith("example"):
+            if placeholder.startswith("[DOMAIN_REDACTED_"):
                 lookbehind = r"(?<!\w)"
             else:
                 lookbehind = r"(?<![.\w])"
@@ -141,7 +157,7 @@ class RedactionEngine:
             new_text = pattern.sub(placeholder, text)
             if new_text != text:
                 # Track the replacement if new occurrences were found
-                if placeholder.startswith("HOST_"):
+                if placeholder.startswith(("[HOST_", "HOST_")):
                     cat = "hostname"
                 elif placeholder.startswith("DOMAIN_USER_"):
                     cat = "ad_domain_user"
@@ -154,8 +170,10 @@ class RedactionEngine:
 
     def unredact(self, text: str) -> str:
         """Replace placeholders with original values using reverse mapping."""
-        reverse = {v: k for k, v in self.mapping.items()
-                   if v != k}  # skip allowlist identity mappings
+        reverse = dict(self.reverse_mapping)
+        for original, placeholder in self.mapping.items():
+            if original != placeholder:
+                reverse.setdefault(placeholder, original)
         # Sort by length (longest first) to avoid partial replacements
         for placeholder in sorted(reverse, key=len, reverse=True):
             text = text.replace(placeholder, reverse[placeholder])
@@ -180,14 +198,25 @@ class RedactionEngine:
     def add_allowlist(self, values: list[str]) -> None:
         """Add values to the allowlist (they will pass through unredacted)."""
         for value in values:
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError("allowlist values must be non-empty strings")
+            previous = self.mapping.get(value)
             self.allowlist.add(value)
             self.mapping[value] = value  # identity mapping
+            if (
+                previous is not None
+                and previous != value
+                and previous not in self.mapping.values()
+            ):
+                self.reverse_mapping.pop(previous, None)
 
     def add_custom_values(
         self, values: list[str], case_sensitive: bool = True
     ) -> None:
         """Add custom literal values to redact."""
         for value in values:
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError("custom values must be non-empty strings")
             flags = 0 if case_sensitive else re.IGNORECASE
             pattern = re.compile(re.escape(value), flags)
             rule = Rule(
@@ -195,7 +224,7 @@ class RedactionEngine:
                 category="custom",
                 priority=50,
                 pattern=pattern,
-                placeholder_template="REDACTED_{n:02d}",
+                placeholder_template="[CUSTOM_REDACTED_{n:04d}]",
                 mapping_key_fn=(str.casefold if not case_sensitive else None),
             )
             self._add_rule(rule)
@@ -204,14 +233,30 @@ class RedactionEngine:
         self,
         name: str,
         pattern: str,
-        replacement: str = "REDACTED_{n:02d}",
+        replacement: str = "[CUSTOM_REDACTED_{n:04d}]",
     ) -> None:
         """Add a custom regex pattern rule."""
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("custom pattern name must be a non-empty string")
+        if not isinstance(pattern, str) or not pattern:
+            raise ValueError("custom pattern must be a non-empty string")
+        if not isinstance(replacement, str) or not replacement:
+            raise ValueError("placeholder template must be a non-empty string")
+        compiled = re.compile(pattern)
+        if compiled.search("") is not None:
+            raise ValueError("custom pattern must not match empty text")
+        try:
+            first = replacement.format(n=1)
+            second = replacement.format(n=2)
+        except (KeyError, IndexError, ValueError) as e:
+            raise ValueError(f"invalid placeholder template: {e}") from e
+        if not first or first == second:
+            raise ValueError("placeholder template must vary with {n}")
         rule = Rule(
             name=name,
             category="custom",
             priority=50,
-            pattern=re.compile(pattern),
+            pattern=compiled,
             placeholder_template=replacement,
         )
         self._add_rule(rule)
@@ -219,6 +264,8 @@ class RedactionEngine:
     def add_target_domains(self, domains: list[str]) -> None:
         """Add target domain rules that match any subdomain."""
         for domain in domains:
+            if not isinstance(domain, str) or not domain.strip():
+                raise ValueError("target domains must be non-empty strings")
             escaped = re.escape(domain)
             pattern = re.compile(
                 r"(?<![.\w])"
@@ -232,26 +279,112 @@ class RedactionEngine:
                 category="hostname",
                 priority=44,
                 pattern=pattern,
-                placeholder_template="HOST_{n:02d}.example.internal",
+                placeholder_template="[HOST_REDACTED_{n:04d}]",
                 mapping_key_fn=str.casefold,
             )
             self._add_rule(rule)
 
     def export_map(self, path: str) -> None:
-        """Export the current mapping to a JSON file."""
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(
-                {"mapping": self.mapping, "counters": self.counters},
-                f,
-                indent=2,
-            )
+        """Export the current mapping atomically with owner-only permissions."""
+        destination = Path(path)
+        fd, temporary_path = tempfile.mkstemp(
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+        )
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "version": 2,
+                        "mapping": self.mapping,
+                        "reverse_mapping": self.reverse_mapping,
+                        "counters": self.counters,
+                    },
+                    f,
+                    indent=2,
+                )
+                f.write("\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temporary_path, destination)
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                os.unlink(temporary_path)
+            except FileNotFoundError:
+                pass
+            raise
 
     def import_map(self, path: str) -> None:
         """Import a mapping from a JSON file for cross-file consistency."""
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
-        self.mapping.update(data.get("mapping", {}))
-        for cat, count in data.get("counters", {}).items():
+        if not isinstance(data, dict):
+            raise ValueError("mapping file root must be a JSON object")
+        version = data.get("version", 1)
+        if (
+            not isinstance(version, int)
+            or isinstance(version, bool)
+            or version not in (1, 2)
+        ):
+            raise ValueError(f"unsupported mapping file version: {version!r}")
+        if version == 2 and "reverse_mapping" not in data:
+            raise ValueError("version 2 mapping file is missing reverse_mapping")
+        imported_mapping = data.get("mapping", {})
+        imported_reverse = data.get("reverse_mapping", {})
+        imported_counters = data.get("counters", {})
+        if not isinstance(imported_mapping, dict) or not all(
+            isinstance(key, str)
+            and bool(key)
+            and isinstance(value, str)
+            and bool(value)
+            for key, value in imported_mapping.items()
+        ):
+            raise ValueError(
+                "mapping must be an object containing non-empty string keys and values"
+            )
+        if not isinstance(imported_reverse, dict) or not all(
+            isinstance(key, str)
+            and bool(key)
+            and isinstance(value, str)
+            and bool(value)
+            for key, value in imported_reverse.items()
+        ):
+            raise ValueError(
+                "reverse_mapping must contain non-empty string keys and values"
+            )
+        unknown_reverse_keys = set(imported_reverse) - set(imported_mapping.values())
+        if unknown_reverse_keys:
+            raise ValueError(
+                "reverse_mapping contains placeholders absent from mapping"
+            )
+        if not isinstance(imported_counters, dict) or not all(
+            isinstance(cat, str)
+            and bool(cat)
+            and isinstance(count, int)
+            and not isinstance(count, bool)
+            and count >= 0
+            for cat, count in imported_counters.items()
+        ):
+            raise ValueError("counters must be an object containing non-negative integers")
+
+        self.mapping.update(imported_mapping)
+        self.reverse_mapping.update(imported_reverse)
+        for original, placeholder in imported_mapping.items():
+            if original != placeholder:
+                self.reverse_mapping.setdefault(placeholder, original)
+        valid_placeholders = set(self.mapping.values())
+        self.reverse_mapping = {
+            placeholder: original
+            for placeholder, original in self.reverse_mapping.items()
+            if placeholder in valid_placeholders
+        }
+        for cat, count in imported_counters.items():
             self.counters[cat] = max(self.counters.get(cat, 0), count)
 
     def get_stats(self) -> dict[str, int]:
@@ -285,8 +418,12 @@ class RedactionEngine:
         if not match:
             return value
 
-        old_id = int(match.group(1))
+        old_id = int(match.group(1) or match.group(2) or match.group(3))
         new_id = remap_ids.get(old_id, old_id)
+        if value.startswith("[HOST_REDACTED_"):
+            return f"[HOST_REDACTED_{new_id:04d}]"
+        if value.startswith("[HOST_SHORT_REDACTED_"):
+            return f"[HOST_SHORT_REDACTED_{new_id:04d}]"
         if value.endswith(".example.internal"):
             return f"HOST_{new_id:02d}.example.internal"
         return f"HOST_{new_id:02d}"
@@ -304,7 +441,7 @@ class RedactionEngine:
         ordered_ids: list[int] = []
         seen_ids: set[int] = set()
         for match in _HOST_PLACEHOLDER.finditer(text):
-            placeholder_id = int(match.group(1))
+            placeholder_id = int(match.group(1) or match.group(2) or match.group(3))
             if placeholder_id in seen_ids:
                 continue
             seen_ids.add(placeholder_id)

@@ -13,3 +13,7 @@ build/
 *.ccache
 *.ccach
 *.kirbi
+
+# Reversible DECON maps contain the original sensitive values
+map.json
+*.decon-map.json

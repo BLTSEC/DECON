@@ -66,10 +66,10 @@ The core feature is **consistent placeholder mapping** — the same real value g
 
 ```
 $ echo "10.4.12.50 can't reach 10.4.12.1. Retrying 10.4.12.50..." | decon
-10.0.0.1 can't reach 10.0.0.2. Retrying 10.0.0.1...
+[IPV4_REDACTED_0001] can't reach [IPV4_REDACTED_0002]. Retrying [IPV4_REDACTED_0001]...
 ```
 
-`10.4.12.50` maps to `10.0.0.1` everywhere. `10.4.12.1` maps to `10.0.0.2` everywhere. The relationship between the two hosts is preserved — the LLM can still tell which host couldn't reach which.
+`10.4.12.50` maps to `[IPV4_REDACTED_0001]` everywhere. `10.4.12.1` maps to `[IPV4_REDACTED_0002]` everywhere. The relationship between the two hosts is preserved — the LLM can still tell which host couldn't reach which. Typed, bracketed placeholders cannot be mistaken for real IPs, emails, MAC addresses, or hostnames.
 
 ## Rules
 
@@ -88,32 +88,32 @@ Rules are applied in priority order to prevent partial matches (e.g., JWTs are m
 | DPAPI Key | `dpapi_machinekey:0xaabb...` | `DPAPI_KEY_01` | 11 |
 | Machine Hex PW | `plain_password_hex:4d00...` | `MACHINE_HEX_PW_01` | 11 |
 | NTLM Hash | `aad3b435...:31d6cfe0...` | `NTLM_HASH_01` | 12 |
-| Secrets | `api_key="sk_live_..."` | `api_key="SECRET_01"` | 15 |
-| CLI Flag Secrets | `-p 'Password1'` | `-p 'SECRET_01'` | 16 |
-| Slash Param Secrets | `/user:admin /rc4:hash` | `/user:SECRET_01 /rc4:SECRET_02` | 16 |
-| SMB User%Pass | `-U admin%P@ss` | `-U SECRET_01%SECRET_02` | 16 |
+| Secrets | `api_key="sk_live_..."` | `api_key="[SECRET_REDACTED_0001]"` | 15 |
+| CLI Flag Secrets | `-p 'Password1'` | `-p '[SECRET_REDACTED_0001]'` | 16 |
+| Slash Param Secrets | `/user:admin /rc4:hash` | `/user:[SECRET_REDACTED_0001] /rc4:[SECRET_REDACTED_0002]` | 16 |
+| SMB User%Pass | `-U admin%P@ss` | `-U [SECRET_REDACTED_0001]%[SECRET_REDACTED_0002]` | 16 |
 | Windows SID | `S-1-5-21-384293...` | `SID_REDACTED_01` | 18 |
 | SSN | `123-45-6789` | `SSN_REDACTED_01` | 20 |
 | Credit Card | `4111111111111111` | `CC_REDACTED_01` | 20 |
 | AD Domain\User | `CORP\jsmith:P@ssw0rd` | `DOMAIN_USER_01` | 25 |
 | AD Domain/User | `CORP/admin:pass@host` | `DOMAIN_USER_01` | 25 |
 | URL | `https://target.com/api` | `URL_REDACTED_01` | 28 |
-| Email | `admin@corp.com` | `user_01@example.com` | 30 |
-| Phone | `(555) 123-4567` | `(555) 555-0001` | 30 |
+| Email | `admin@corp.com` | `[EMAIL_REDACTED_0001]` | 30 |
+| Phone | `(555) 123-4567` | `[PHONE_REDACTED_0001]` | 30 |
 | UNC Path | `\\dc01\SYSVOL` | `UNC_PATH_01` | 34 |
-| Linux Home Path | `/home/julio/.ssh/` | `/home/SECRET_01/.ssh/` | 36 |
-| Windows User Path | `C:\Users\admin\` | `C:\Users\SECRET_01\` | 36 |
-| CIDR | `10.0.0.0/16` | `10.0.0.1/16` | 39 |
-| IPv4 | `192.168.1.50` | `10.0.0.1` | 40 |
-| IPv6 | `fe80::1` | `fd00::1` | 40 |
-| MAC | `aa:bb:cc:dd:ee:ff` | `00:DE:AD:00:00:01` | 40 |
-| Hostname | `dc01.corp.local` | `HOST_01.example.internal` | 45 |
+| Linux Home Path | `/home/julio/.ssh/` | `/home/[SECRET_REDACTED_0001]/.ssh/` | 36 |
+| Windows User Path | `C:\Users\admin\` | `C:\Users\[SECRET_REDACTED_0001]\` | 36 |
+| CIDR | `10.0.0.0/16` | `[CIDR_REDACTED_0001]/16` | 39 |
+| IPv4 | `192.168.1.50` | `[IPV4_REDACTED_0001]` | 40 |
+| IPv6 | `fe80::1` | `[IPV6_REDACTED_0001]` | 40 |
+| MAC | `aa:bb:cc:dd:ee:ff` | `[MAC_REDACTED_0001]` | 40 |
+| Hostname | `dc01.corp.local` | `[HOST_REDACTED_0001]` | 44 |
 
 Loopback and special addresses (`127.0.0.1`, `0.0.0.0`, `255.255.255.255`, `169.254.x.x`) pass through unredacted — they're never target infrastructure.
 
 URLs pointing to public code hosting and security reference sites (`github.com`, `gitlab.com`, `exploit-db.com`, `attack.mitre.org`, etc.) also pass through. Standard Nmap boilerplate URLs (`https://nmap.org` in the banner and `https://nmap.org/submit/` in the service-detection footer) also pass through. Sensitive values within URLs are still caught by custom value rules when relevant.
 
-Context-anchored secrets (priority 15) preserve the label and only redact the value — `password=Hunter2` becomes `password=SECRET_01`, so the LLM knows a password was there without seeing the actual credential. `Domain:` / `domain=` values are handled specially: FQDN-like values are redacted with hostname placeholders, while non-FQDN domain names still use `SECRET_XX`. CLI flag secrets (priority 16) catch `-p`, `-P`, `-H`, `--password`, `--hash`, `-u`, `-l`, `--user`, `--login` flags common in hydra, netexec, evil-winrm commands. For Nmap-style scan commands, `-p 80,443,8443` port lists/ranges are preserved instead of being treated as secrets. Rubeus/Mimikatz `/param:value` style (`/user:`, `/rc4:`, `/ntlm:`, `/aes256:`, `/password:`, `/domain:`) and smbclient `-U user%password` format are also matched.
+Context-anchored secrets (priority 15) preserve the label and only redact the value — `password=Hunter2` becomes `password=[SECRET_REDACTED_0001]`, so the LLM knows a password was there without seeing the actual credential. Short values and quoted values containing spaces are also redacted. `Domain:` / `domain=` values are handled specially: FQDN-like values use `[DOMAIN_REDACTED_XXXX]`, while non-FQDN domain names use `[SECRET_REDACTED_XXXX]`. CLI flag secrets (priority 16) catch `-p`, `-P`, `-H`, `--password`, `--hash`, `-u`, `-l`, `--user`, `--login` flags common in hydra, netexec, evil-winrm commands. For Nmap-style scan commands, `-p 80,443,8443` port lists/ranges are preserved instead of being treated as secrets. Rubeus/Mimikatz `/param:value` style (`/user:`, `/rc4:`, `/ntlm:`, `/aes256:`, `/password:`, `/domain:`) and smbclient `-U user%password` format are also matched.
 
 AD domain\user patterns skip Windows built-in identities (`NT AUTHORITY\SYSTEM`, `BUILTIN\Administrators`, `NT SERVICE\...`) and registry paths (`HKLM\...`, `HKEY_...`, `SOFTWARE\...`, `Microsoft\...`) to avoid false positives.
 
@@ -129,9 +129,9 @@ AD domain\user patterns match both backslash (Windows) and forward-slash (Impack
 
 Internal hostnames match `.corp`, `.local`, `.internal`, `.intra`, `.priv`, `.lan`, `.htb`, and `.lab` TLDs — covering both real engagement and CTF/lab environments. Single-label reverse-DNS names in Nmap output (`rDNS record for ...: CASTELBLACK`) are also redacted as hostnames.
 
-For fresh runs, hostname placeholders are normalized by first textual appearance in the final redacted output (`HOST_01`, `HOST_02`, ...), which makes Nmap and mixed log output easier to read. Imported hostname mappings still preserve their existing numbering for cross-file consistency.
+For fresh runs, hostname placeholders are normalized by first textual appearance in the final redacted output (`[HOST_REDACTED_0001]`, `[HOST_REDACTED_0002]`, ...), which makes Nmap and mixed log output easier to read. Correlated single-label aliases use `[HOST_SHORT_REDACTED_XXXX]` with the same numeric ID. Imported hostname mappings still preserve their existing numbering for cross-file consistency.
 
-CIDR notation preserves the original subnet mask — `10.0.0.0/16` becomes `10.0.0.1/16`, not `/24`.
+CIDR notation preserves the original subnet mask — `10.0.0.0/16` becomes `[CIDR_REDACTED_0001]/16`, not `/24`.
 
 Credit card detection uses Luhn validation to avoid false positives on random digit sequences.
 
@@ -179,7 +179,7 @@ allowlist = ["scanme.nmap.org"]                      # pass through unredacted
 [[custom.patterns]]
 name = "internal_domains"
 pattern = '[a-z0-9-]+\.corp\.acme\.com'
-replacement = "HOST_{n:02d}.example.internal"
+replacement = "[CUSTOM_HOST_REDACTED_{n:04d}]"
 
 [profiles.client-share]
 hostname_internal = true
@@ -211,7 +211,7 @@ The built-in hostname rule only catches internal TLDs (`.corp`, `.internal`, `.l
 target_domains = ["contoso.com", "acmecorp.org"]
 ```
 
-This matches `contoso.com`, `dc01.contoso.com`, `mail.internal.contoso.com`, etc. — all mapped to `HOST_XX.example.internal` placeholders. Matching is case-insensitive, so `MAIL.CONTOSO.COM` is caught too.
+This matches `contoso.com`, `dc01.contoso.com`, `mail.internal.contoso.com`, etc. — all mapped to `[HOST_REDACTED_XXXX]` placeholders. Matching is case-insensitive, so `MAIL.CONTOSO.COM` is caught too.
 
 ### Allowlist
 
@@ -253,7 +253,7 @@ decon --import-map map.json scan2.txt > clean2.txt
 decon --import-map map.json --export-map map.json scan3.txt > clean3.txt
 ```
 
-The mapping file is JSON — `10.4.12.50` maps to `10.0.0.1` in every file.
+The mapping file is JSON — `10.4.12.50` maps to `[IPV4_REDACTED_0001]` in every file. Map files also retain the first-seen original spelling for reversible case-insensitive and canonicalized matches (such as hostnames, IPv6 addresses, and MAC addresses). Map files are written atomically with owner-only (`0600`) permissions because they contain the original sensitive values. Never commit or share them; the common `map.json` and `*.decon-map.json` names are ignored by this repository.
 
 `--check` and `--dry-run` work correctly with imported mappings too — if an
 imported map causes a value to be replaced, DECON reports it even when no new
@@ -285,7 +285,7 @@ decon --export-map map.json pentest.log > clean.log
 # ... paste clean.log into LLM, get analysis back ...
 
 # Restore original values in the LLM's response
-echo "The issue is on 10.0.0.1 port 443" | decon --unredact map.json
+echo "The issue is on [IPV4_REDACTED_0001] port 443" | decon --unredact map.json
 # → "The issue is on 10.4.12.50 port 443"
 ```
 
@@ -322,17 +322,17 @@ decon --diff pentest.log
 +++ redacted
 @@ -1,3 +1,3 @@
 -Server 10.4.12.50 is up
-+Server 10.0.0.1 is up
++Server [IPV4_REDACTED_0001] is up
  Port 443/tcp open
 -Contact admin@corp.com
-+Contact user_01@example.com
++Contact [EMAIL_REDACTED_0001]
 ```
 
 ## LLM Safety Net
 
 DECON's regex engine handles the heavy lifting, but regex can't catch everything — a client name mentioned conversationally, a bare username, or a non-standard credential format. The optional LLM pass acts as a **reviewer, not a redactor**. It receives the already-redacted text and flags anything suspicious that the regex missed.
 
-The LLM never sees the original data. It only reviews what would already be safe to share. Large inputs are automatically truncated to avoid context overflow.
+The configured Ollama endpoint receives only the regex-redacted text, not the pre-redaction input. Because the review is specifically looking for values the regex pass missed, that text can still contain sensitive data. The default endpoint is local; configure `llm.host` only to a trusted system. Large inputs are reviewed completely in overlapping, line-aware chunks rather than being truncated.
 
 The LLM prompt is deliberately aggressive ("flag everything"), and a deterministic post-filter strips known false positives: DECON's own placeholder patterns (even when the LLM appends port numbers or context), common software/vendor names from service banners (Apache, OpenSSH, Ubuntu, etc.), timestamps from tool output, well-known public wordlist filenames (rockyou.txt, SecLists files, etc.), and duplicate findings. This avoids relying on small models to make nuanced judgment calls.
 
@@ -422,6 +422,11 @@ DECON_LLM=1 decon pentest.log
 
 If Ollama isn't running, DECON warns on stderr and proceeds with regex-only output — it never blocks.
 
+LLM review also participates in non-output modes: `--check` exits non-zero for
+LLM-only findings, `--dry-run` lists them, and `--diff` reviews the proposed
+redacted text. Batch `--output-dir` runs the review for every file and reports
+findings without silently modifying the batch output.
+
 When the LLM flags something:
 
 ```
@@ -443,10 +448,10 @@ User admin@acmecorp.com connected from aa:bb:cc:dd:ee:ff
 api_key="sk_live_abc123def456ghi789"
 SSH to db01.corp.acme.com as jsmith' | decon -v
 
-Server 10.0.0.1 cant reach 10.0.0.2
-User user_01@example.com connected from 00:DE:AD:00:00:01
-api_key="SECRET_01"
-SSH to HOST_01.example.internal as jsmith
+Server [IPV4_REDACTED_0001] cant reach [IPV4_REDACTED_0002]
+User [EMAIL_REDACTED_0001] connected from [MAC_REDACTED_0001]
+api_key="[SECRET_REDACTED_0001]"
+SSH to [HOST_REDACTED_0001] as jsmith
 
 Redaction stats:
   email: 1

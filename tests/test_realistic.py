@@ -105,14 +105,14 @@ Nmap done: 256 IP addresses (2 hosts up) scanned in 43.21 seconds
         )
         result = _engine().redact(text)
         _assert_clean(result, "sevenkingdoms.local0.,")
-        assert "(Domain: example.internal0.," in result
+        assert "(Domain: [DOMAIN_REDACTED_0001]0.," in result
         assert ", Site: Default-First-Site-Name)" in result
 
     def test_rdns_single_label_hostname_redacted(self):
         text = "rDNS record for 10.1.10.22: CASTELBLACK"
         result = _engine().redact(text)
         _assert_clean(result, "10.1.10.22", "CASTELBLACK")
-        assert "HOST_01" in result
+        assert "[HOST_SHORT_REDACTED_0001]" in result
         assert ".example.internal" not in result
 
     def test_hostname_placeholders_follow_textual_order(self):
@@ -125,12 +125,12 @@ rDNS record for 10.1.10.11: WINTERFELL
 389/tcp  open   ldap Microsoft Windows Active Directory LDAP (Domain: sevenkingdoms.local0., Site: Default-First-Site-Name)
 """
         result = _engine().redact(text)
-        assert "Command: nmap -Pn -sT -sV -p 389,445,1433 HOST_01.example.internal HOST_02.example.internal" in result
-        assert "Nmap scan report for HOST_01.example.internal (10.0.0.1)" in result
-        assert "Nmap scan report for HOST_02.example.internal (10.0.0.2)" in result
-        assert "rDNS record for 10.0.0.1: HOST_01" in result
-        assert "rDNS record for 10.0.0.2: HOST_02" in result
-        assert "(Domain: example.internal0., Site: Default-First-Site-Name)" in result
+        assert "Command: nmap -Pn -sT -sV -p 389,445,1433 [HOST_REDACTED_0001] [HOST_REDACTED_0002]" in result
+        assert "Nmap scan report for [HOST_REDACTED_0001] ([IPV4_REDACTED_0001])" in result
+        assert "Nmap scan report for [HOST_REDACTED_0002] ([IPV4_REDACTED_0002])" in result
+        assert "rDNS record for [IPV4_REDACTED_0001]: [HOST_SHORT_REDACTED_0001]" in result
+        assert "rDNS record for [IPV4_REDACTED_0002]: [HOST_SHORT_REDACTED_0002]" in result
+        assert "(Domain: [DOMAIN_REDACTED_0001]0., Site: Default-First-Site-Name)" in result
 
 
 class TestNetexecOutput:
@@ -477,28 +477,27 @@ class TestPlaceholderCollision:
     def test_ip_placeholder_stable_across_rules(self):
         """An IP redacted by IPv4 rule should not be re-matched by later rules."""
         engine = _engine()
-        # This IP gets redacted to 10.0.0.1 by IPv4 rule (priority 40)
+        # This IP gets a typed placeholder from the IPv4 rule (priority 40).
         result = engine.redact("Host 192.168.1.1 is down")
         ip_placeholder = engine.mapping["192.168.1.1"]
-        # The placeholder itself (10.0.0.1) must not create a new mapping entry
+        # The placeholder itself must not create a new mapping entry.
         assert ip_placeholder not in engine.mapping, \
             f"Placeholder {ip_placeholder!r} was re-mapped"
 
     def test_double_pass_no_cascade(self):
         """Redacting already-redacted output must not re-map placeholders.
 
-        Without the fix, 192.168.1.1 → 10.0.0.1 on first pass, then
-        10.0.0.1 → 10.0.0.2 on second pass (placeholder treated as new IP).
+        Typed placeholders must remain stable across repeated passes.
         """
         engine = _engine()
         r1 = engine.redact("Host 192.168.1.1")
-        assert r1 == "Host 10.0.0.1"
+        assert r1 == "Host [IPV4_REDACTED_0001]"
 
         # Second pass on already-redacted output — must be idempotent
         r2 = engine.redact(r1)
         assert r2 == r1, f"Double-pass changed output: {r1!r} → {r2!r}"
-        assert "10.0.0.1" not in engine.mapping, \
-            "Placeholder 10.0.0.1 was re-mapped as a new value"
+        assert "[IPV4_REDACTED_0001]" not in engine.mapping, \
+            "Placeholder was re-mapped as a new value"
 
     def test_double_pass_many_ips(self):
         """Multiple IPs survive a double pass without cascading."""
@@ -695,8 +694,8 @@ class TestMACEdgeCases:
         )
         _assert_clean(result, "aa:bb:cc:dd:ee:ff", "11:22:33:44:55:66")
         # Different MACs get different placeholders
-        assert "00:DE:AD:00:00:01" in result
-        assert "00:DE:AD:00:00:02" in result
+        assert "[MAC_REDACTED_0001]" in result
+        assert "[MAC_REDACTED_0002]" in result
 
 
 class TestEmailEdgeCases:
@@ -712,8 +711,8 @@ class TestEmailEdgeCases:
         engine = _engine()
         result = engine.redact("from admin@corp.com to user@corp.com")
         _assert_clean(result, "admin@corp.com", "user@corp.com")
-        assert "user_01@example.com" in result
-        assert "user_02@example.com" in result
+        assert "[EMAIL_REDACTED_0001]" in result
+        assert "[EMAIL_REDACTED_0002]" in result
 
     def test_email_in_angle_brackets(self):
         result = _engine().redact("From: <admin@corp.com>")
@@ -813,11 +812,10 @@ class TestContextSecretEdgeCases:
         result = _engine().redact("credential=hunter2xyzabc")
         _assert_clean(result, "hunter2xyzabc")
 
-    def test_short_value_not_matched(self):
-        """Values < 4 chars should not be matched by context_secret."""
+    def test_short_value_is_matched(self):
+        """Explicit password contexts redact even short values."""
         result = _engine().redact("password=abc")
-        # abc is only 3 chars, pattern requires {4,}
-        assert "abc" in result
+        assert "abc" not in result
 
     def test_multiple_secrets_different_keys(self):
         engine = _engine()
@@ -927,7 +925,7 @@ class TestCrossCallConsistency:
             engine2.import_map(path)
             engine2.redact("10.10.14.20")  # should get counter=3, not 1
 
-            assert engine2.mapping["10.10.14.20"] == "10.0.0.3"
+            assert engine2.mapping["10.10.14.20"] == "[IPV4_REDACTED_0003]"
         finally:
             os.unlink(path)
 
@@ -1166,7 +1164,7 @@ class TestIPv6Compressed:
         """2600:3c01::f03c:91ff:fe18:bb2f — the nmap scanme address."""
         result = _engine().redact("addr 2600:3c01::f03c:91ff:fe18:bb2f")
         _assert_clean(result, "2600:3c01::f03c:91ff:fe18:bb2f")
-        assert "fd00::" in result
+        assert "[IPV6_REDACTED_0001]" in result
 
     def test_three_prefix_three_suffix(self):
         result = _engine().redact("addr 2001:db8:85a3::8a2e:370:7334")
@@ -1180,7 +1178,7 @@ class TestIPv6Compressed:
         engine = _engine()
         result = engine.redact("listening on ::1")
         assert "::1" in engine.mapping
-        assert result == "listening on fd00::1"
+        assert result == "listening on [IPV6_REDACTED_0001]"
 
     def test_trailing_double_colon(self):
         result = _engine().redact("prefix 2001:db8::")

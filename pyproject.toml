@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "decon"
-version = "0.2.0"
+version = "0.3.0"
 description = "Sanitize operational data before sharing. Consistent placeholders preserve analytical value."
 readme = "README.md"
 license = { text = "MIT" }

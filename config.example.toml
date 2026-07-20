@@ -25,7 +25,7 @@ allowlist = ["scanme.nmap.org"]                      # pass through unredacted
 # Must be valid TOML + valid Python regex; DECON reports config errors cleanly.
 name = "internal_domains"
 pattern = '[a-z0-9-]+\.corp\.acme\.com'
-replacement = "HOST_{n:02d}.example.internal"
+replacement = "[CUSTOM_HOST_REDACTED_{n:04d}]"
 
 [profiles.client-share]
 hostname_internal = true

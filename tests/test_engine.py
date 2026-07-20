@@ -10,20 +10,20 @@ class TestConsistentMapping:
     def test_same_ip_same_placeholder(self):
         engine = RedactionEngine()
         result = engine.redact("Server 10.4.12.50 can't reach 10.4.12.1. Retry 10.4.12.50.")
-        # First IP gets 10.0.0.1, second gets 10.0.0.2
+        # First and second IPs get distinct typed placeholders.
         assert "10.4.12.50" not in result
         assert "10.4.12.1" not in result
         # Same IP -> same placeholder
-        assert result.count("10.0.0.1") == 2  # 10.4.12.50 appears twice
-        assert result.count("10.0.0.2") == 1  # 10.4.12.1 appears once
+        assert result.count("[IPV4_REDACTED_0001]") == 2
+        assert result.count("[IPV4_REDACTED_0002]") == 1
 
     def test_email_redaction(self):
         engine = RedactionEngine()
         result = engine.redact("Contact admin@corp.com or admin@corp.com for help")
         assert "admin@corp.com" not in result
-        assert "user_01@example.com" in result
+        assert "[EMAIL_REDACTED_0001]" in result
         # Same email -> same placeholder
-        assert result.count("user_01@example.com") == 2
+        assert result.count("[EMAIL_REDACTED_0001]") == 2
 
     def test_mixed_types(self):
         engine = RedactionEngine()
@@ -75,7 +75,14 @@ class TestCustomValues:
         result = engine.redact("User JSMITH logged in as jsmith")
         assert "JSMITH" not in result
         assert "jsmith" not in result
-        assert result.count("REDACTED_01") == 2
+        assert result.count("[CUSTOM_REDACTED_0001]") == 2
+
+    def test_empty_value_is_rejected(self):
+        try:
+            RedactionEngine().add_custom_values([""])
+            assert False, "Should have raised ValueError"
+        except ValueError:
+            pass
 
 
 class TestCustomPattern:
@@ -88,7 +95,23 @@ class TestCustomPattern:
         )
         result = engine.redact("ssh to db01.corp.acme.com")
         assert "db01.corp.acme.com" not in result
-        assert "HOST_01.example.internal" in result
+        assert "[HOST_REDACTED_0001]" in result
+
+    def test_empty_matching_regex_is_rejected(self):
+        try:
+            RedactionEngine().add_custom_pattern("bad", r"x*")
+            assert False, "Should have raised ValueError"
+        except ValueError:
+            pass
+
+    def test_constant_placeholder_is_rejected(self):
+        try:
+            RedactionEngine().add_custom_pattern(
+                "bad", r"secret", replacement="[CUSTOM_REDACTED]"
+            )
+            assert False, "Should have raised ValueError"
+        except ValueError:
+            pass
 
 
 class TestTargetDomains:
@@ -98,7 +121,7 @@ class TestTargetDomains:
         result = engine.redact("MAIL.CONTOSO.COM and Mail.Contoso.Com")
         assert "MAIL.CONTOSO.COM" not in result
         assert "Mail.Contoso.Com" not in result
-        assert result.count("HOST_01.example.internal") == 2
+        assert result.count("[HOST_REDACTED_0001]") == 2
 
 
 class TestExportImportMap:
@@ -117,7 +140,7 @@ class TestExportImportMap:
 
             # New engine should use same mapping
             result = engine2.redact("Connecting to 10.4.12.50")
-            assert "10.0.0.1" in result
+            assert "[IPV4_REDACTED_0001]" in result
         finally:
             os.unlink(path)
 
@@ -162,4 +185,4 @@ class TestMACRedaction:
         engine = RedactionEngine()
         result = engine.redact("interface aa:bb:cc:dd:ee:ff")
         assert "aa:bb:cc:dd:ee:ff" not in result
-        assert "00:DE:AD:00:00:01" in result
+        assert "[MAC_REDACTED_0001]" in result

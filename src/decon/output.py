@@ -56,7 +56,7 @@ def read_clipboard(quiet: bool = False) -> str | None:
     for cmd in _CLIPBOARD_READ_COMMANDS:
         try:
             result = subprocess.run(cmd, capture_output=True, check=True)
-            return result.stdout.decode()
+            return result.stdout.decode(errors="replace")
         except FileNotFoundError:
             continue
         except subprocess.CalledProcessError:
@@ -74,7 +74,7 @@ def capture_tmux_pane(quiet: bool = False) -> str | None:
             capture_output=True,
             check=True,
         )
-        return result.stdout.decode()
+        return result.stdout.decode(errors="replace")
     except FileNotFoundError:
         if not quiet:
             print("tmux not found", file=sys.stderr)

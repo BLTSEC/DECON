@@ -175,8 +175,13 @@ def build_parser() -> argparse.ArgumentParser:
 def _validate_args(args: argparse.Namespace) -> str | None:
     """Return an error message if args are invalid, or None if OK."""
     # Mutual exclusion: output destinations
-    if args.output and args.output_dir:
-        return "--output and --output-dir cannot be used together"
+    destinations = [
+        args.output is not None,
+        args.output_dir is not None,
+        args.clipboard,
+    ]
+    if sum(destinations) > 1:
+        return "--output, --output-dir, and --clipboard cannot be used together"
 
     # Mutual exclusion: modes
     modes = [args.dry_run, args.check, args.diff]
@@ -184,6 +189,25 @@ def _validate_args(args: argparse.Namespace) -> str | None:
         modes.append(True)
     if sum(modes) > 1:
         return "--dry-run, --check, --diff, and --unredact are mutually exclusive"
+
+    if args.output_dir and any(
+        (args.dry_run, args.check, args.diff, args.unredact)
+    ):
+        return (
+            "--output-dir cannot be used with --dry-run, --check, "
+            "--diff, or --unredact"
+        )
+
+    if args.output_dir and (args.tmux or args.clipboard_in):
+        return "--output-dir cannot be used with --tmux or --clipboard-in"
+
+    if (args.dry_run or args.check or args.diff) and (
+        args.output or args.clipboard
+    ):
+        return (
+            "--output and --clipboard cannot be used with --dry-run, "
+            "--check, or --diff"
+        )
 
     # --output-dir requires files
     if args.output_dir and not args.files:
@@ -198,8 +222,12 @@ def main(argv: list[str] | None = None) -> int:
 
     # --init-config: create config and exit
     if args.init_config:
-        init_config()
-        return 0
+        try:
+            init_config()
+            return 0
+        except ConfigError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
 
     # Validate argument combinations
     err = _validate_args(args)
@@ -247,10 +275,6 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Unknown rule: {err}", file=sys.stderr)
             return 1
 
-    # Allowlist
-    if args.allow:
-        engine.add_allowlist(_split_csv(args.allow))
-
     # Custom redaction values
     if args.redact:
         engine.add_custom_values(_split_csv(args.redact), case_sensitive=False)
@@ -274,12 +298,18 @@ def main(argv: list[str] | None = None) -> int:
         if text is None:
             return 1
         result = engine.unredact(text)
-        _write_output(args, result)
-        return 0
+        return 0 if _write_output(args, result) else 1
+
+    # Imported maps may contain entries for configured allowlisted values.
+    # Reapply allowlists after import so explicit pass-through rules win.
+    if engine.allowlist:
+        engine.add_allowlist(list(engine.allowlist))
+    if args.allow:
+        engine.add_allowlist(_split_csv(args.allow))
 
     # --output-dir mode: batch process files
     if args.output_dir:
-        return _batch_process(args, engine)
+        return _batch_process(args, engine, config)
 
     # Gather input
     text = _read_input(args)
@@ -291,13 +321,26 @@ def main(argv: list[str] | None = None) -> int:
     result = report.text
     applied_redactions = report.unique_applied()
     changed = report.changed
+    result, llm_findings = _review_with_llm(
+        args,
+        config,
+        engine,
+        result,
+        interactive=not (args.check or args.dry_run),
+        announce=not (args.check or args.dry_run),
+    )
 
     # --check mode: exit non-zero if new redactions found
     if args.check:
-        if changed:
-            print(f"Found {len(applied_redactions)} value(s) to redact:", file=sys.stderr)
-            for cat, count in sorted(_stats_for_applied(applied_redactions).items()):
-                print(f"  {cat}: {count}", file=sys.stderr)
+        if changed or llm_findings:
+            if not args.quiet:
+                total = len(applied_redactions) + len(llm_findings)
+                print(f"Found {total} value(s) to redact:", file=sys.stderr)
+                stats = _stats_for_applied(applied_redactions)
+                if llm_findings:
+                    stats["llm"] = len(llm_findings)
+                for cat, count in sorted(stats.items()):
+                    print(f"  {cat}: {count}", file=sys.stderr)
             return 1
         if not args.quiet:
             print("Clean — no redactions needed.", file=sys.stderr)
@@ -305,14 +348,20 @@ def main(argv: list[str] | None = None) -> int:
 
     # --dry-run: show mapping instead of output
     if args.dry_run:
-        if not changed:
-            print("No redactions found.", file=sys.stderr)
-        else:
-            print("Redactions that would be applied:", file=sys.stderr)
-            for _category, real, placeholder in sorted(
-                applied_redactions, key=lambda x: x[2]
-            ):
-                print(f"  {real} -> {placeholder}", file=sys.stderr)
+        if not args.quiet:
+            if not changed and not llm_findings:
+                print("No redactions found.", file=sys.stderr)
+            else:
+                if changed:
+                    print("Redactions that would be applied:", file=sys.stderr)
+                    for _category, real, placeholder in sorted(
+                        applied_redactions, key=lambda x: x[2]
+                    ):
+                        print(f"  {real} -> {placeholder}", file=sys.stderr)
+                if llm_findings:
+                    print("LLM findings:", file=sys.stderr)
+                    for value in llm_findings:
+                        print(f"  {value}", file=sys.stderr)
         return 0
 
     # --diff: show unified diff
@@ -326,47 +375,68 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.writelines(diff)
         return 0
 
-    # LLM review
-    llm_cfg = get_llm_config(config)
-    use_llm = (
-        args.llm
-        or os.environ.get("DECON_LLM") == "1"
-        or llm_cfg.get("enabled", False)
-    )
-
-    if use_llm:
-        review = llm_review(
-            result,
-            model=llm_cfg.get("model", "qwen3.5:9b"),
-            host=llm_cfg.get("host", "http://localhost:11434"),
-            quiet=args.quiet,
-        )
-        if review and "CLEAN" not in review:
-            findings = parse_findings(review)
-            if findings and not args.quiet and sys.stderr.isatty():
-                selected = _prompt_llm_review(findings)
-                if selected:
-                    engine.add_custom_values(selected, case_sensitive=False)
-                    result = engine.redact(result)
-                    print(
-                        f"Redacted {len(selected)} value(s)",
-                        file=sys.stderr,
-                    )
-            elif findings and not args.quiet:
-                print("LLM review flagged potential issues:", file=sys.stderr)
-                print(review, file=sys.stderr)
-                print("---", file=sys.stderr)
-
     # Output
-    _write_output(args, result)
+    if not _write_output(args, result):
+        return 1
 
     # Export mapping
-    _export_map(args, engine)
+    if not _export_map(args, engine):
+        return 1
 
     # Verbose stats
     _print_stats(args, engine)
 
     return 0
+
+
+def _llm_enabled(args: argparse.Namespace, config: dict) -> bool:
+    """Return whether LLM review is enabled for this invocation."""
+    llm_cfg = get_llm_config(config)
+    return bool(
+        args.llm
+        or os.environ.get("DECON_LLM") == "1"
+        or llm_cfg.get("enabled", False)
+    )
+
+
+def _review_with_llm(
+    args: argparse.Namespace,
+    config: dict,
+    engine: RedactionEngine,
+    result: str,
+    *,
+    interactive: bool,
+    announce: bool,
+) -> tuple[str, list[str]]:
+    """Run optional LLM review and return updated text plus findings."""
+    if not _llm_enabled(args, config):
+        return result, []
+
+    llm_cfg = get_llm_config(config)
+    review = llm_review(
+        result,
+        model=llm_cfg.get("model", "qwen3.5:9b"),
+        host=llm_cfg.get("host", "http://localhost:11434"),
+        quiet=args.quiet,
+    )
+    if not review or review.strip() == "CLEAN":
+        return result, []
+
+    findings = parse_findings(review)
+    if not findings:
+        return result, []
+
+    if interactive and not args.quiet and sys.stderr.isatty():
+        selected = _prompt_llm_review(findings)
+        if selected:
+            engine.add_custom_values(selected, case_sensitive=False)
+            result = engine.redact(result)
+            print(f"Redacted {len(selected)} value(s)", file=sys.stderr)
+    elif announce and not args.quiet:
+        print("LLM review flagged potential issues:", file=sys.stderr)
+        print(review, file=sys.stderr)
+        print("---", file=sys.stderr)
+    return result, findings
 
 
 def _prompt_llm_review(findings: list[str]) -> list[str]:
@@ -403,26 +473,33 @@ def _prompt_llm_review(findings: list[str]) -> list[str]:
     return selected
 
 
-def _write_output(args: argparse.Namespace, result: str) -> None:
+def _write_output(args: argparse.Namespace, result: str) -> bool:
     """Write result to the configured output destination."""
-    if args.output:
-        write_file(result, args.output, quiet=args.quiet)
-    elif args.clipboard:
-        write_clipboard(result, quiet=args.quiet)
-    else:
-        write_stdout(result)
+    try:
+        if args.output:
+            write_file(result, args.output, quiet=args.quiet)
+        elif args.clipboard:
+            return write_clipboard(result, quiet=args.quiet)
+        else:
+            write_stdout(result)
+    except OSError as e:
+        if not args.quiet:
+            print(f"Error writing output: {e}", file=sys.stderr)
+        return False
+    return True
 
 
-def _export_map(args: argparse.Namespace, engine: RedactionEngine) -> None:
+def _export_map(args: argparse.Namespace, engine: RedactionEngine) -> bool:
     """Export mapping if requested."""
     if args.export_map:
         try:
             engine.export_map(args.export_map)
         except OSError as e:
             print(f"Error writing map {args.export_map}: {e}", file=sys.stderr)
-            return
+            return False
         if not args.quiet:
             print(f"Mapping exported to {args.export_map}", file=sys.stderr)
+    return True
 
 
 def _apply_rule_names(
@@ -441,25 +518,43 @@ def _apply_rule_names(
 def _batch_process(
     args: argparse.Namespace,
     engine: RedactionEngine,
+    config: dict,
 ) -> int:
     """Process multiple files, writing each to output-dir."""
-    os.makedirs(args.output_dir, exist_ok=True)
+    try:
+        os.makedirs(args.output_dir, exist_ok=True)
+    except OSError as e:
+        print(f"Error creating output directory {args.output_dir}: {e}", file=sys.stderr)
+        return 1
     output_paths = _build_batch_output_paths(args.files, args.output_dir)
 
     for path in args.files:
         try:
-            with open(path) as f:
+            with open(path, encoding="utf-8") as f:
                 text = f.read()
-        except OSError as e:
+        except (OSError, UnicodeError) as e:
             print(f"Error reading {path}: {e}", file=sys.stderr)
             return 1
 
         result = engine.redact(text)
+        result, _findings = _review_with_llm(
+            args,
+            config,
+            engine,
+            result,
+            interactive=False,
+            announce=True,
+        )
         out_path = output_paths[path]
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        write_file(result, str(out_path), quiet=args.quiet)
+        try:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            write_file(result, str(out_path), quiet=args.quiet)
+        except OSError as e:
+            print(f"Error writing {out_path}: {e}", file=sys.stderr)
+            return 1
 
-    _export_map(args, engine)
+    if not _export_map(args, engine):
+        return 1
     _print_stats(args, engine)
     return 0
 
@@ -526,9 +621,9 @@ def _read_input(args: argparse.Namespace) -> str | None:
     if args.files:
         for path in args.files:
             try:
-                with open(path) as f:
+                with open(path, encoding="utf-8") as f:
                     texts.append(f.read())
-            except OSError as e:
+            except (OSError, UnicodeError) as e:
                 print(f"Error reading {path}: {e}", file=sys.stderr)
                 return None
 

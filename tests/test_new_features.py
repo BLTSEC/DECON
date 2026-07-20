@@ -224,7 +224,7 @@ class TestURLEmailPriority:
         engine = RedactionEngine()
         result = engine.redact("contact admin@corp.com for help")
         assert "admin@corp.com" not in result
-        assert "user_01@example.com" in result
+        assert "[EMAIL_REDACTED_0001]" in result
 
 
 # ---------------------------------------------------------------------------
@@ -291,14 +291,14 @@ class TestTargetDomains:
         engine.add_target_domains(["contoso.com"])
         result = engine.redact("targeting contoso.com")
         assert "contoso.com" not in result
-        assert "HOST_01.example.internal" in result
+        assert "[HOST_REDACTED_0001]" in result
 
     def test_subdomain_matched(self):
         engine = RedactionEngine()
         engine.add_target_domains(["contoso.com"])
         result = engine.redact("ssh to dc01.contoso.com")
         assert "dc01.contoso.com" not in result
-        assert "HOST_01.example.internal" in result
+        assert "[HOST_REDACTED_0001]" in result
 
     def test_unrelated_domain_not_matched(self):
         engine = RedactionEngine()
@@ -387,7 +387,7 @@ class TestDiffMode:
         assert "---" in captured.out
         assert "+++" in captured.out
         assert "10.4.12.50" in captured.out
-        assert "10.0.0.1" in captured.out
+        assert "[IPV4_REDACTED_0001]" in captured.out
 
     def test_diff_no_changes(self, monkeypatch, capsys):
         monkeypatch.setattr("sys.stdin", StringIO("Nothing to redact.\n"))
@@ -592,7 +592,7 @@ class TestTargetDomainMultiLevel:
         engine.add_target_domains(["contoso.com"])
         result = engine.redact("mail.east.contoso.com")
         assert "contoso.com" not in result
-        assert "HOST_01.example.internal" in result
+        assert "[HOST_REDACTED_0001]" in result
 
     def test_three_level_subdomain(self):
         engine = RedactionEngine()
@@ -630,6 +630,26 @@ class TestModeConflicts:
         captured = capsys.readouterr()
         assert "mutually exclusive" in captured.err
 
+    def test_clipboard_and_output_conflict(self, capsys):
+        ret = main(["--clipboard", "--output", "out.txt"])
+        assert ret == 1
+        assert "cannot be used together" in capsys.readouterr().err
+
+    def test_batch_and_check_conflict(self, capsys):
+        ret = main(["dummy.txt", "--output-dir", "/tmp/out", "--check"])
+        assert ret == 1
+        assert "--output-dir cannot be used" in capsys.readouterr().err
+
+    def test_batch_and_tmux_conflict(self, capsys):
+        ret = main(["dummy.txt", "--output-dir", "/tmp/out", "--tmux"])
+        assert ret == 1
+        assert "--tmux" in capsys.readouterr().err
+
+    def test_diff_and_output_conflict(self, capsys):
+        ret = main(["--diff", "--output", "out.txt"])
+        assert ret == 1
+        assert "cannot be used with" in capsys.readouterr().err
+
 
 class TestMapFileErrors:
     def test_import_map_missing_file(self, monkeypatch, capsys):
@@ -661,12 +681,17 @@ class TestDryRunWithAllowlist:
         assert "10.4.12.50" not in captured.err
 
 
-class TestLLMTruncation:
+class TestLLMChunking:
     def test_placeholder_regex_covers_new_types(self):
         """Verify the placeholder regex matches all new placeholder formats."""
         from decon.llm import _PLACEHOLDER_RE
 
         new_placeholders = [
+            "[IPV4_REDACTED_0001]",
+            "[HOST_REDACTED_0001]",
+            "[DOMAIN_REDACTED_0001]",
+            "[CUSTOM_REDACTED_0001]",
+            "[CUSTOM_HOST_REDACTED_0001]",
             "NTLM_HASH_01",
             "DOMAIN_USER_01",
             "UNC_PATH_01",
@@ -677,6 +702,63 @@ class TestLLMTruncation:
         for p in new_placeholders:
             assert _PLACEHOLDER_RE.match(p), f"Placeholder not matched: {p}"
 
+    def test_chunker_preserves_full_input_with_overlap(self):
+        from decon.llm import (
+            LLM_CHUNK_OVERLAP,
+            MAX_LLM_CHARS,
+            _chunk_review_text,
+        )
+
+        text = "a" * (MAX_LLM_CHARS * 2 + 123)
+        chunks = _chunk_review_text(text)
+        assert len(chunks) >= 3
+        assert all(len(chunk) <= MAX_LLM_CHARS for chunk in chunks)
+        assert chunks[0].startswith(text[:100])
+        assert chunks[-1].endswith(text[-100:])
+        for previous, current in zip(chunks, chunks[1:]):
+            assert previous[-LLM_CHUNK_OVERLAP:] == current[:LLM_CHUNK_OVERLAP]
+
+    def test_llm_review_checks_tail_instead_of_truncating(
+        self, monkeypatch, capsys
+    ):
+        from decon.llm import MAX_LLM_CHARS, llm_review
+
+        payloads = []
+
+        class FakeResponse:
+            def __init__(self, content):
+                self.content = content
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps({
+                    "message": {"content": self.content}
+                }).encode()
+
+        def fake_urlopen(request, timeout):
+            assert timeout == 300
+            payload = json.loads(request.data.decode())
+            payloads.append(payload)
+            prompt = payload["messages"][0]["content"]
+            content = "FOUND: tail-secret" if "tail-secret" in prompt else "CLEAN"
+            return FakeResponse(content)
+
+        monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+        text = "a" * (MAX_LLM_CHARS * 2) + "\ntail-secret"
+        response = llm_review(text)
+
+        assert len(payloads) >= 3
+        assert "tail-secret" in payloads[-1]["messages"][0]["content"]
+        assert response == "FOUND: tail-secret"
+        captured = capsys.readouterr()
+        assert "LLM chunks" in captured.err
+        assert "truncat" not in captured.err.lower()
+
 
 class TestLLMPostFilterNormalization:
     """Test that the post-filter handles LLM-added context on placeholder values."""
@@ -684,31 +766,31 @@ class TestLLMPostFilterNormalization:
     def test_ip_with_port_filtered(self):
         from decon.llm import _filter_placeholder_findings
 
-        raw = "FOUND: 10.0.0.1:81"
+        raw = "FOUND: [IPV4_REDACTED_0001]:81"
         assert _filter_placeholder_findings(raw) == "CLEAN"
 
     def test_ip_with_parenthetical_filtered(self):
         from decon.llm import _filter_placeholder_findings
 
-        raw = "FOUND: 10.0.0.1 (target IP)"
+        raw = "FOUND: [IPV4_REDACTED_0001] (target IP)"
         assert _filter_placeholder_findings(raw) == "CLEAN"
 
     def test_ip_with_dash_commentary_filtered(self):
         from decon.llm import _filter_placeholder_findings
 
-        raw = "FOUND: 10.0.0.1 - used as target"
+        raw = "FOUND: [IPV4_REDACTED_0001] - used as target"
         assert _filter_placeholder_findings(raw) == "CLEAN"
 
     def test_ip_with_protocol_prefix_filtered(self):
         from decon.llm import _filter_placeholder_findings
 
-        raw = "FOUND: http-get://10.0.0.1:81/"
+        raw = "FOUND: http-get://[IPV4_REDACTED_0001]:81/"
         assert _filter_placeholder_findings(raw) == "CLEAN"
 
     def test_plain_placeholder_still_filtered(self):
         from decon.llm import _filter_placeholder_findings
 
-        raw = "FOUND: 10.0.0.1"
+        raw = "FOUND: [IPV4_REDACTED_0001]"
         assert _filter_placeholder_findings(raw) == "CLEAN"
 
     def test_software_with_context_filtered(self):
@@ -728,11 +810,15 @@ class TestLLMPostFilterNormalization:
     def test_mixed_real_and_placeholder(self):
         from decon.llm import _filter_placeholder_findings
 
-        raw = "FOUND: 10.0.0.1:81\nFOUND: basic-auth-user\nFOUND: 10.0.0.2 (target)"
+        raw = (
+            "FOUND: [IPV4_REDACTED_0001]:81\n"
+            "FOUND: basic-auth-user\n"
+            "FOUND: [IPV4_REDACTED_0002] (target)"
+        )
         result = _filter_placeholder_findings(raw)
         assert "basic-auth-user" in result
-        assert "10.0.0.1" not in result
-        assert "10.0.0.2" not in result
+        assert "IPV4_REDACTED_0001" not in result
+        assert "IPV4_REDACTED_0002" not in result
 
     def test_normalize_finding_direct(self):
         from decon.llm import _normalize_finding
@@ -1165,7 +1251,7 @@ class TestExpandedContextSecrets:
     def test_domain_fqdn_uses_parent_domain_placeholder(self):
         result = RedactionEngine().redact("Domain: sevenkingdoms.local")
         assert "sevenkingdoms.local" not in result
-        assert "example.internal" in result
+        assert "[DOMAIN_REDACTED_0001]" in result
 
     def test_multiple_fqdn_domains_get_distinct_parent_domain_placeholders(self):
         result = RedactionEngine().redact(
@@ -1173,8 +1259,8 @@ class TestExpandedContextSecrets:
         )
         assert "sevenkingdoms.local" not in result
         assert "winterfell.local" not in result
-        assert "example.internal" in result
-        assert "example02.internal" in result
+        assert "[DOMAIN_REDACTED_0001]" in result
+        assert "[DOMAIN_REDACTED_0002]" in result
 
     def test_ntlm_keyword(self):
         result = RedactionEngine().redact("NTLM: 64f12cddaa88057e06a81b54e73b949b")
@@ -1486,11 +1572,11 @@ class TestCLIFlagFalsePositives:
 
     def test_filename_extension(self):
         result = RedactionEngine().redact("hydra -l user.list target")
-        assert "user.list" in result
+        assert "user.list" not in result
 
     def test_password_file(self):
         result = RedactionEngine().redact("hydra -p passwords.txt target")
-        assert "passwords.txt" in result
+        assert "passwords.txt" not in result
 
     def test_template_placeholder(self):
         result = RedactionEngine().redact("nxc -u <username> -p <password>")
@@ -1501,3 +1587,151 @@ class TestCLIFlagFalsePositives:
         result = RedactionEngine().redact("nxc -u fcastle -p Password1")
         assert "fcastle" not in result
         assert "Password1" not in result
+
+
+class TestMajorRegressionFixes:
+    def test_real_values_that_matched_old_placeholders_are_redacted(self):
+        text = "10.0.0.1 fd00::1 00:DE:AD:00:00:01 user_01@example.com"
+        result = RedactionEngine().redact(text)
+        assert "10.0.0.1" not in result
+        assert "fd00::1" not in result
+        assert "00:DE:AD:00:00:01" not in result
+        assert "user_01@example.com" not in result
+        assert "[IPV4_REDACTED_0001]" in result
+
+    def test_typed_placeholders_are_idempotent_across_engines(self):
+        first = RedactionEngine().redact(
+            "10.0.0.1 fd00::1 aa:bb:cc:dd:ee:ff admin@example.org "
+            "password=Hunter2 Domain: corp.local "
+            "smbclient -U admin%P@ssword1"
+        )
+        assert RedactionEngine().redact(first) == first
+
+    def test_unbracketed_decon_placeholders_are_idempotent_in_secret_context(self):
+        text = "password=PRIVATE_KEY_REDACTED_01 username=DOMAIN_USER_01"
+        assert RedactionEngine().redact(text) == text
+
+    def test_unrelated_bracketed_code_is_not_treated_as_a_placeholder(self):
+        engine = RedactionEngine()
+        engine.add_custom_values(["[CLIENT_2024]"])
+        assert engine.redact("Engagement [CLIENT_2024]") == (
+            "Engagement [CUSTOM_REDACTED_0001]"
+        )
+
+    def test_uppercase_internal_hostname_is_redacted(self):
+        result = RedactionEngine().redact("DC01.CORP.LOCAL")
+        assert result == "[HOST_REDACTED_0001]"
+
+    def test_more_than_99_hostnames_remain_unique_and_reversible(self):
+        hosts = ["first.contoso.com"] + [
+            f"host{i}.corp.local" for i in range(1, 100)
+        ]
+        engine = RedactionEngine()
+        engine.add_target_domains(["contoso.com"])
+
+        result = engine.redact(" ".join(hosts))
+        placeholders = result.split()
+
+        assert len(placeholders) == 100
+        assert len(set(placeholders)) == 100
+        assert placeholders[0] == "[HOST_REDACTED_0001]"
+        assert placeholders[-1] == "[HOST_REDACTED_0100]"
+        assert engine.counters["hostname"] == 100
+        assert engine.unredact(placeholders[0]) == "first.contoso.com"
+        assert engine.redact("new.corp.local") == "[HOST_REDACTED_0101]"
+
+    def test_dotted_short_and_spaced_credentials_are_redacted(self):
+        text = (
+            'tool -u john.doe -p password.com --username ab --password xy '
+            'token=abc secret="correct horse battery staple"'
+        )
+        result = RedactionEngine().redact(text)
+        for value in (
+            "john.doe",
+            "password.com",
+            " ab ",
+            " xy ",
+            "token=abc",
+            "correct horse battery staple",
+        ):
+            assert value not in result
+
+    def test_smb_user_and_password_keep_separate_placeholders(self):
+        result = RedactionEngine().redact(
+            "smbclient -U admin%P@ssword1 //server/share"
+        )
+        assert (
+            "-U [SECRET_REDACTED_0001]%[SECRET_REDACTED_0002]" in result
+        )
+
+    def test_exported_map_is_owner_only(self, tmp_path):
+        path = tmp_path / "map.json"
+        engine = RedactionEngine()
+        engine.redact("10.4.12.50 password=Hunter2")
+        engine.export_map(str(path))
+        assert os.stat(path).st_mode & 0o777 == 0o600
+
+    def test_import_rejects_non_object_root(self, tmp_path):
+        path = tmp_path / "map.json"
+        path.write_text("[]")
+        try:
+            RedactionEngine().import_map(str(path))
+            assert False, "Expected ValueError"
+        except ValueError as e:
+            assert "root must be a JSON object" in str(e)
+
+    def test_import_rejects_non_integer_version(self, tmp_path):
+        path = tmp_path / "map.json"
+        path.write_text(json.dumps({"version": 1.0, "mapping": {}}))
+        try:
+            RedactionEngine().import_map(str(path))
+            assert False, "Expected ValueError"
+        except ValueError as e:
+            assert "unsupported mapping file version" in str(e)
+
+    def test_stale_imported_counter_cannot_duplicate_placeholder(self, tmp_path):
+        path = tmp_path / "map.json"
+        path.write_text(json.dumps({
+            "mapping": {"10.1.1.1": "[IPV4_REDACTED_0001]"},
+            "counters": {"ipv4": 0},
+        }))
+        engine = RedactionEngine()
+        engine.import_map(str(path))
+        assert engine.redact("10.2.2.2") == "[IPV4_REDACTED_0002]"
+
+    def test_case_insensitive_custom_value_unredacts_original_spelling(self):
+        engine = RedactionEngine()
+        engine.add_custom_values(["projectx"], case_sensitive=False)
+        redacted = engine.redact("ProjectX")
+        assert engine.unredact(redacted) == "ProjectX"
+
+    def test_reverse_spelling_survives_map_round_trip(self, tmp_path):
+        path = tmp_path / "map.json"
+        first = RedactionEngine()
+        first.add_target_domains(["corp.example"])
+        redacted = first.redact("DC01.Corp.Example")
+        first.export_map(str(path))
+
+        second = RedactionEngine()
+        second.import_map(str(path))
+        assert second.unredact(redacted) == "DC01.Corp.Example"
+
+    def test_equivalent_mac_spellings_share_a_placeholder(self):
+        engine = RedactionEngine()
+        result = engine.redact(
+            "AA:BB:CC:DD:EE:FF aa-bb-cc-dd-ee-ff aabb.ccdd.eeff"
+        )
+        assert result.split() == ["[MAC_REDACTED_0001]"] * 3
+        assert engine.counters["mac"] == 1
+
+    def test_equivalent_ipv6_spellings_share_a_placeholder(self):
+        engine = RedactionEngine()
+        result = engine.redact("2001:DB8::1 2001:0db8:0:0:0:0:0:1")
+        assert result.split() == ["[IPV6_REDACTED_0001]"] * 2
+        assert engine.counters["ipv6"] == 1
+
+    def test_hostname_case_variants_share_a_placeholder(self):
+        engine = RedactionEngine()
+        result = engine.redact("DC01.CORP.LOCAL dc01.corp.local")
+        assert result.split() == ["[HOST_REDACTED_0001]"] * 2
+        assert engine.counters["hostname"] == 1
