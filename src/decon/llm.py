@@ -36,6 +36,9 @@ def _build_placeholder_re() -> re.Pattern[str]:
 
     # Also match default and documented custom placeholder formats.
     fragments.append(r"\[CUSTOM_[A-Z0-9_]*REDACTED_\d+\]")
+    # Typed engagement targets are registered from config at runtime, so their
+    # templates are not in build_default_rules().
+    fragments.append(r"\[SHARE_REDACTED_\d+\]")
     # Legacy custom value placeholders remain safe for imported/older output.
     fragments.append(r"REDACTED_\d+")
     # Domain-context FQDN placeholders are parent-domain style.
@@ -55,7 +58,7 @@ REVIEW_PROMPT = """\
 This is redacted pentest output. Placeholders ([IPV4_REDACTED_XXXX], \
 [IPV6_REDACTED_XXXX], [MAC_REDACTED_XXXX], [EMAIL_REDACTED_XXXX], \
 [HOST_REDACTED_XXXX], [HOST_SHORT_REDACTED_XXXX], [DOMAIN_REDACTED_XXXX], \
-[SECRET_REDACTED_XXXX], [CUSTOM_REDACTED_XXXX], \
+[SECRET_REDACTED_XXXX], [SHARE_REDACTED_XXXX], [CUSTOM_REDACTED_XXXX], \
 URL_REDACTED_XX, NTLM_HASH_XX, NTLMV2_HASH_XX, SAM_DUMP_XX, \
 KERBEROS_KEY_XX, KERBEROS_HASH_XX, DCC2_HASH_XX, DPAPI_KEY_XX, \
 SID_REDACTED_XX, DOMAIN_USER_XX, UNC_PATH_XX, \

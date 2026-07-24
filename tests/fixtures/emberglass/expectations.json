@@ -1,0 +1,31 @@
+{
+  "source_glob": "vault/Engagements/Operation Emberglass/*.md",
+  "must_remove": [
+    "10.77.24.10",
+    "10.77.24.20",
+    "10.77.24.30",
+    "dc01.emberglass.internal",
+    "portal.emberglass.internal",
+    "files01.emberglass.internal",
+    "security.lead@emberglass.internal",
+    "Lantern-Cobalt-47!",
+    "Archive-Meteor-82!",
+    "demo_token_6f2c9a84_not_valid",
+    "02:42:ac:11:00:30",
+    "S-1-5-21-4242424242-3131313131-2020202020"
+  ],
+  "must_preserve": [
+    "445",
+    "SMB signing",
+    "impacket-secretsdump",
+    "impacket-GetUserSPNs",
+    "Operation Emberglass",
+    "replication",
+    "Cleanup"
+  ],
+  "repeated_values": [
+    "10.77.24.10",
+    "10.77.24.20",
+    "svc_archive"
+  ]
+}

@@ -17,3 +17,7 @@ build/
 # Reversible DECON maps contain the original sensitive values
 map.json
 *.decon-map.json
+
+# So do saved sessions and the audit log, if ever pointed inside a repo
+audit.jsonl
+*.audit.jsonl

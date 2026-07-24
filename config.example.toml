@@ -15,11 +15,37 @@ enabled = false
 model = "qwen3.5:9b"
 host = "http://localhost:11434"
 
+[audit]
+enabled = true                       # log every substitution (default)
+# path = "~/engagement-audit.jsonl"  # default: ~/.local/state/decon/audit.jsonl
+
+[ask]
+provider = "claude"                  # claude | openai | ollama
+host = "http://localhost:11434"      # ollama only
+max_tokens = 16000
+warn_chars = 50000                   # warn above this input size; 0 disables
+
+# Models are keyed by provider so --provider never sends a name to the wrong one
+[ask.models]
+claude = "claude-opus-5"
+openai = "gpt-5"
+ollama = "qwen3.5:9b"
+
 [custom]
 values = ["ACME Corp", "Project Nighthawk"]          # case-sensitive
 values_nocase = ["jsmith", "proddb"]                 # case-insensitive, one placeholder across case variants
 target_domains = ["contoso.com", "acmecorp.org"]     # case-insensitive bare domain + subdomains
 allowlist = ["scanme.nmap.org"]                      # pass through unredacted
+
+# Typed engagement identifiers. Regex catches common formats, but every
+# engagement has its own naming conventions — a host called prod-web-01 slips
+# past the generic hostname rules. Declaring identifiers here closes that gap
+# while keeping their type: unlike `values`, these do NOT collapse into a
+# generic [CUSTOM_REDACTED_] placeholder.
+hostnames = ["DC01", "FILESERV01", "prod-web-01"]    # -> [HOST_SHORT_REDACTED_nnnn]
+usernames = ["jsmith", "svc_backup"]                 # -> DOMAIN_USER_nn
+netbios = ["ACME"]                                   # -> [DOMAIN_REDACTED_nnnn]
+shares = ["SYSVOL", "NETLOGON", "HR-Data"]           # -> [SHARE_REDACTED_nnnn]
 
 [[custom.patterns]]
 # Must be valid TOML + valid Python regex; DECON reports config errors cleanly.

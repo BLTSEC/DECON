@@ -84,7 +84,9 @@ decon --check report.md
 | Reversible maps | Restore original values locally when a workflow requires it |
 | Batch processing | Share one mapping across an entire engagement directory |
 | Local LLM review | Ask Ollama to flag values the deterministic rules may have missed |
-| Zero dependencies | Runs on the Python standard library |
+| LLM round trip | Ask a model about redacted data and get an answer with real values restored |
+| Audit trail | Every substitution recorded to an owner-only JSONL log |
+| Zero dependencies | Core runs on the Python standard library |
 
 ## What it redacts
 
@@ -195,6 +197,12 @@ values_nocase = ["jsmith", "proddb"]
 target_domains = ["corp.example"]
 allowlist = ["scanme.nmap.org"]
 
+# Typed engagement identifiers — keep their type in the output
+hostnames = ["DC01", "prod-web-01"]
+usernames = ["svc_backup"]
+netbios = ["ACME"]
+shares = ["SYSVOL", "HR-Data"]
+
 [[custom.patterns]]
 name = "ticket_ids"
 pattern = 'CLIENT-[0-9]{4}'
@@ -225,6 +233,34 @@ Invalid tables, rule names, value types, regular expressions, and placeholder
 templates fail with a concise configuration error. See
 [`config.example.toml`](config.example.toml) for the complete example.
 
+### Typed engagement identifiers
+
+Regex catches common formats, but every engagement has its own naming
+conventions — a host called `prod-web-01` slips past the generic hostname rules,
+and a bare `DC01` or `SYSVOL` mentioned in prose has nothing to key on.
+
+Declaring these under `[custom]` closes the gap **without losing type**. Unlike
+`values` and `values_nocase`, which collapse everything into
+`[CUSTOM_REDACTED_nnnn]`, each typed array keeps its own placeholder namespace:
+
+| Key | Placeholder |
+|---|---|
+| `hostnames` | `[HOST_SHORT_REDACTED_nnnn]` |
+| `usernames` | `DOMAIN_USER_nn` |
+| `netbios` | `[DOMAIN_REDACTED_nnnn]` |
+| `shares` | `[SHARE_REDACTED_nnnn]` |
+
+All four match case-insensitively. A bare hostname reuses the placeholder
+already assigned to its FQDN, so `DC01` and `DC01.corp.example.com` stay one
+machine rather than becoming two.
+
+> [!TIP]
+> These match anywhere the bare token appears, so avoid declaring a value that
+> is also an ordinary word in text you want to keep — listing `ACME` as
+> `netbios` will also redact it inside a project codename like
+> `Operation ACME`. Drop the entry, or narrow it with a `[[custom.patterns]]`
+> rule instead.
+
 ## Consistent and reversible mappings
 
 Export a map when placeholders must remain stable across separate commands:
@@ -248,13 +284,76 @@ echo "Investigate [IPV4_REDACTED_0001]:443" \
 ```
 
 > [!CAUTION]
-> A map contains the original sensitive values. DECON writes maps atomically
-> with mode `0600`, and this repository ignores `map.json` and
-> `*.decon-map.json`. Never commit, upload, or share a reversible map.
+> Maps, saved sessions, and the audit log all contain the original sensitive
+> values. DECON writes them atomically with mode `0600` inside an owner-only
+> directory, and this repository ignores `map.json` and `*.decon-map.json`.
+> Never commit, upload, or share any of them.
 
 Case-insensitive and canonicalized values—such as hostname case variants,
 equivalent IPv6 spellings, and alternate MAC formats—share a placeholder. A
 map retains the first-seen original spelling for reverse redaction.
+
+### Sessions
+
+A session is a map DECON names and stores for you, so a paste-into-a-chat round
+trip is two short commands instead of a map path you have to keep track of:
+
+```bash
+decon --session -c scan.txt     # redact -> clipboard, mapping saved as "last"
+# paste into the assistant, copy its reply
+decon --restore -c              # placeholders -> real values, back to clipboard
+```
+
+Name a session to keep concurrent engagements apart, and clean up when the
+engagement ends:
+
+```bash
+decon --session acme -c scan.txt
+decon --restore acme -c
+decon --list-sessions
+decon --forget acme          # delete one reversible map
+decon --forget-all           # delete them all
+```
+
+Sessions live in `~/.local/state/decon/sessions/` (or `$XDG_STATE_HOME`). Each
+one is a reversible map, so `--forget` them when you no longer need the round
+trip.
+
+If a restored placeholder has no mapping — a model reformatted it, or it came
+from a different session — DECON says so rather than leaving it to look like
+real output:
+
+```text
+Warning: 2 placeholder(s) had no mapping and were left as-is:
+  [HOST_REDACTED_1], [IPV4_REDACTED_0099]
+```
+
+> [!TIP]
+> `--session` and `--restore` take an *optional* name, so a bare
+> `decon --session scan.txt` would read `scan.txt` as the session name. DECON
+> detects that and tells you to write `decon --session -c scan.txt` or
+> `decon --session=NAME scan.txt` instead.
+
+### Audit log
+
+Every substitution is appended to `~/.local/state/decon/audit.jsonl` as one JSON
+record per run:
+
+```json
+{"ts":"2026-07-24T12:00:00+00:00","mode":"redact","sources":["scan.txt"],
+ "substitutions":[{"category":"hostname","original":"dc01.corp.local",
+                   "placeholder":"[HOST_REDACTED_0001]"}]}
+```
+
+Runs that redact nothing write nothing. If the log cannot be written, DECON
+warns and still produces your sanitized output — auditing never costs you the
+redaction. Turn it off per run with `--no-audit`, or permanently:
+
+```toml
+[audit]
+enabled = false
+# path = "~/engagement-audit.jsonl"
+```
 
 ## Optional Ollama review
 
@@ -297,6 +396,98 @@ For a container, configure the host endpoint explicitly:
 enabled = true
 host = "http://host.docker.internal:11434"
 ```
+
+## Asking an LLM directly
+
+`--ask` closes the loop: DECON redacts your input, sends the sanitized text with
+your question, then restores the real values in the answer. You write and read
+real infrastructure; the provider only ever sees placeholders.
+
+```bash
+decon --ask "What are two attack paths here?" scan.txt
+decon --ask "Summarize the AD findings" --provider ollama notes.md
+```
+
+Because placeholders are consistent, the model can still reason about topology
+and repetition — it just does so over `[HOST_REDACTED_0001]` instead of a real
+hostname, and its answer comes back with your hostnames restored.
+
+Cloud providers need the optional extra; Ollama needs nothing beyond the
+standard library:
+
+```bash
+pipx inject decon anthropic openai     # or: pip install 'decon[ask]'
+export ANTHROPIC_API_KEY=...           # or OPENAI_API_KEY
+```
+
+```toml
+[ask]
+provider = "claude"          # claude | openai | ollama
+host = "http://localhost:11434"
+max_tokens = 16000
+warn_chars = 50000           # warn above this input size; 0 disables
+
+[ask.models]                 # keyed by provider, so --provider is always safe
+claude = "claude-opus-5"
+ollama = "qwen3.5:9b"
+```
+
+DECON warns before sending an unusually large document, since it cannot know a
+provider's context limit or your budget.
+
+> [!NOTE]
+> Redaction reduces exposure; it does not prove the text is safe to send. Review
+> `decon --dry-run` output before pointing `--ask` at a third-party API for the
+> first time on a new engagement. Prefer `--provider ollama` when nothing may
+> leave the machine.
+
+If a provider's safety classifiers decline the request — security tooling can
+trip them — DECON reports the refusal and its category rather than failing with
+a traceback. The Claude provider also opts into server-side fallback, so a
+declined request is retried on another model automatically.
+
+## Pre-commit hook
+
+The strongest place to catch a leak is before it is ever committed. DECON ships
+a hook definition, so guarding a notes vault is a few lines:
+
+```yaml
+# .pre-commit-config.yaml
+repos:
+  - repo: https://github.com/BLTSEC/DECON
+    rev: v0.3.0
+    hooks:
+      - id: decon
+```
+
+```bash
+pre-commit install
+```
+
+The hook runs `decon --check` over staged text files and fails the commit with a
+per-category breakdown when anything would be redacted:
+
+```text
+Found 9 value(s) to redact:
+  ad_domain_user: 2
+  hostname: 1
+  ipv4: 1
+  secret: 2
+  spn: 2
+  windows_sid: 1
+```
+
+It defaults to `.md`, `.txt`, `.log`, `.json`, and `.csv`. Narrow or widen it in
+your own config:
+
+```yaml
+      - id: decon
+        files: ^notes/.*\.md$
+        exclude: ^notes/templates/
+```
+
+`--check` reads and reports only — it writes no output and no audit log, so the
+hook never persists the values it finds.
 
 ## NOCAP integration
 
@@ -342,9 +533,12 @@ Run `decon --help` for the complete, current reference.
 | Custom literals | `--redact VALUES` |
 | Allowlist | `--allow VALUES` |
 | Mapping | `--import-map FILE`, `--export-map FILE`, `--unredact FILE` |
+| Sessions | `--session [NAME]`, `--restore [NAME]`, `--list-sessions`, `--forget NAME`, `--forget-all` |
 | Rule control | `--enable RULES`, `--disable RULES`, `--list-rules` |
 | Profile | `--profile NAME` |
 | Local LLM review | `--llm` |
+| Ask an LLM | `--ask PROMPT`, `--provider NAME`, `--model NAME` |
+| Audit | `--no-audit` |
 
 Environment variables:
 
@@ -352,6 +546,7 @@ Environment variables:
 |---|---|
 | `DECON_PROFILE=name` | Select a configuration profile |
 | `DECON_LLM=1` | Enable Ollama review |
+| `DECON_STATE_DIR=path` | Override the sessions and audit-log directory |
 
 ## Development
 

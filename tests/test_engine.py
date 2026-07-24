@@ -3,6 +3,9 @@
 import json
 import tempfile
 import os
+
+import pytest
+
 from decon.engine import RedactionEngine
 
 
@@ -122,6 +125,96 @@ class TestTargetDomains:
         assert "MAIL.CONTOSO.COM" not in result
         assert "Mail.Contoso.Com" not in result
         assert result.count("[HOST_REDACTED_0001]") == 2
+
+
+class TestTypedTargets:
+    """Engagement identifiers keep their type instead of collapsing to CUSTOM."""
+
+    @pytest.mark.parametrize(
+        ("method", "value", "placeholder"),
+        [
+            ("add_target_hostnames", "DC01", "[HOST_SHORT_REDACTED_0001]"),
+            ("add_target_usernames", "svc_backup", "DOMAIN_USER_01"),
+            ("add_target_netbios", "ACME", "[DOMAIN_REDACTED_0001]"),
+            ("add_target_shares", "SYSVOL", "[SHARE_REDACTED_0001]"),
+        ],
+    )
+    def test_typed_placeholder(self, method, value, placeholder):
+        engine = RedactionEngine()
+        getattr(engine, method)([value])
+        result = engine.redact(f"the {value} entry")
+        assert value not in result
+        assert placeholder in result
+
+    @pytest.mark.parametrize(
+        ("method", "value"),
+        [
+            ("add_target_hostnames", "DC01"),
+            ("add_target_usernames", "svc_backup"),
+            ("add_target_netbios", "ACME"),
+            ("add_target_shares", "SYSVOL"),
+        ],
+    )
+    def test_case_insensitive(self, method, value):
+        engine = RedactionEngine()
+        getattr(engine, method)([value])
+        result = engine.redact(f"{value.upper()} and {value.lower()}")
+        assert value.upper() not in result
+        assert value.lower() not in result
+
+    @pytest.mark.parametrize(
+        ("method", "value"),
+        [
+            ("add_target_hostnames", "DC01"),
+            ("add_target_usernames", "jsmith"),
+            ("add_target_shares", "SYSVOL"),
+        ],
+    )
+    def test_rejects_empty_values(self, method, value):
+        engine = RedactionEngine()
+        with pytest.raises(ValueError):
+            getattr(engine, method)([""])
+
+    # A bare short name must not mint a second identity for a host already
+    # mapped via its FQDN.
+    def test_bare_hostname_reuses_fqdn_placeholder(self):
+        engine = RedactionEngine()
+        engine.add_target_hostnames(["DC01"])
+        result = engine.redact("DC01.corp.example.com is the DC. Reach DC01 directly.")
+        assert "DC01" not in result
+        assert "[HOST_REDACTED_0001]" in result
+        assert "[HOST_SHORT_REDACTED_0001]" in result
+
+    # The boundary must reject a dot that continues a domain label, but allow
+    # one that ends a sentence.
+    def test_does_not_match_inside_an_fqdn(self):
+        engine = RedactionEngine()
+        engine.add_target_netbios(["corp"])
+        result = engine.redact("host dc01.corp.example.com here")
+        assert "[DOMAIN_REDACTED_0001]" not in result
+
+    def test_matches_at_end_of_sentence(self):
+        engine = RedactionEngine()
+        engine.add_target_usernames(["jsmith"])
+        result = engine.redact("readable by jsmith.")
+        assert "jsmith" not in result
+        assert result.endswith(".")
+
+    def test_roundtrip_restores_all_types(self):
+        engine = RedactionEngine()
+        engine.add_target_hostnames(["DC01"])
+        engine.add_target_usernames(["jsmith"])
+        engine.add_target_netbios(["ACME"])
+        engine.add_target_shares(["SYSVOL"])
+        text = "ACME host DC01 shares SYSVOL with jsmith."
+        redacted = engine.redact(text)
+        assert engine.unredact(redacted) == text
+
+    def test_share_placeholder_is_not_re_redacted(self):
+        engine = RedactionEngine()
+        engine.add_target_shares(["SYSVOL"])
+        once = engine.redact("mount SYSVOL now")
+        assert engine.redact(once) == once
 
 
 class TestExportImportMap:

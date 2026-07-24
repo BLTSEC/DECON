@@ -24,11 +24,35 @@ enabled = false
 model = "qwen3.5:9b"
 host = "http://localhost:11434"
 
+[audit]
+# Every substitution is logged to ~/.local/state/decon/audit.jsonl.
+# The log contains the real values — treat it like a mapping file.
+enabled = true
+# path = "~/engagement-audit.jsonl"
+
+[ask]
+# Provider for --ask. Cloud providers need: pip install 'decon[ask]'
+provider = "claude"
+# host = "http://localhost:11434"   # ollama only
+# max_tokens = 16000
+# warn_chars = 50000                # warn above this input size; 0 disables
+
+# [ask.models]                      # per-provider, so --provider is always safe
+# claude = "claude-opus-5"
+# ollama = "qwen3.5:9b"
+
 [custom]
 values = []          # case-sensitive literal strings
 values_nocase = []   # case-insensitive literal strings
 allowlist = []       # values to pass through unredacted
 target_domains = []  # target domains — auto-generates hostname rules
+
+# Typed engagement identifiers — keep their type instead of becoming
+# generic [CUSTOM_REDACTED_] placeholders
+hostnames = []       # short/NetBIOS host names, e.g. "DC01"
+usernames = []       # bare usernames, e.g. "svc_backup"
+netbios = []         # NetBIOS domain names, e.g. "ACME"
+shares = []          # SMB share names, e.g. "SYSVOL"
 
 # [[custom.patterns]]
 # name = "internal_domains"
@@ -214,6 +238,18 @@ def apply_config_to_engine(engine, config: dict, profile: str | None = None) -> 
     if target_domains:
         engine.add_target_domains(target_domains)
 
+    # Typed engagement identifiers — unlike custom.values these keep their type,
+    # so a hostname stays distinguishable from a username in redacted output.
+    for key, add in (
+        ("hostnames", engine.add_target_hostnames),
+        ("usernames", engine.add_target_usernames),
+        ("netbios", engine.add_target_netbios),
+        ("shares", engine.add_target_shares),
+    ):
+        values = _string_list(custom, key, prefix="custom")
+        if values:
+            add(values)
+
     # Allowlist
     allowlist = _string_list(custom, "allowlist", prefix="custom")
     if allowlist:
@@ -240,6 +276,39 @@ def apply_config_to_engine(engine, config: dict, profile: str | None = None) -> 
             not isinstance(llm[key], str) or not llm[key].strip()
         ):
             raise ConfigError(f"llm.{key} must be a non-empty string")
+
+    ask = _require_table(config, "ask")
+    providers = ("claude", "openai", "ollama")
+    if "provider" in ask and ask["provider"] not in providers:
+        raise ConfigError("ask.provider must be claude, openai, or ollama")
+    for key in ("model", "host"):
+        if key in ask and (
+            not isinstance(ask[key], str) or not ask[key].strip()
+        ):
+            raise ConfigError(f"ask.{key} must be a non-empty string")
+    models = ask.get("models", {})
+    if not isinstance(models, dict):
+        raise ConfigError("ask.models must be a table of provider = model")
+    for name, value in models.items():
+        if name not in providers:
+            raise ConfigError(f"Unknown provider in ask.models: {name}")
+        if not isinstance(value, str) or not value.strip():
+            raise ConfigError(f"ask.models.{name} must be a non-empty string")
+    for key in ("max_tokens", "warn_chars"):
+        if key in ask and (
+            not isinstance(ask[key], int)
+            or isinstance(ask[key], bool)
+            or ask[key] < 0
+        ):
+            raise ConfigError(f"ask.{key} must be a non-negative integer")
+
+    audit = _require_table(config, "audit")
+    if "enabled" in audit and not isinstance(audit["enabled"], bool):
+        raise ConfigError("audit.enabled must be true or false")
+    if "path" in audit and (
+        not isinstance(audit["path"], str) or not audit["path"].strip()
+    ):
+        raise ConfigError("audit.path must be a non-empty string")
 
 
 def init_config() -> Path:
@@ -274,3 +343,8 @@ def init_config() -> Path:
 def get_llm_config(config: dict) -> dict:
     """Extract LLM settings from config."""
     return config.get("llm", {})
+
+
+def get_audit_config(config: dict) -> dict:
+    """Extract audit-log settings from config."""
+    return config.get("audit", {})

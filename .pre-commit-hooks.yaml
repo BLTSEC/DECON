@@ -1,0 +1,13 @@
+- id: decon
+  name: decon (block unredacted sensitive data)
+  description: >-
+    Fail the commit when staged files still contain IPs, hostnames, credentials,
+    hashes, or other operational data DECON would redact.
+  entry: decon --check --no-audit
+  language: python
+  # Notes and reports are where engagement data actually leaks from. Widen or
+  # narrow this in your own .pre-commit-config.yaml with `files:`/`exclude:`.
+  types: [text]
+  files: \.(md|markdown|txt|log|json|csv)$
+  # --check reads the files it is given and writes nothing.
+  pass_filenames: true
