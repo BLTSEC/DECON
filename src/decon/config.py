@@ -340,21 +340,23 @@ def init_config() -> Path:
     return path
 
 
-DEFAULT_TARGETS_PATH = Path.home() / "known_targets.txt"
-
 # Plain-text engagement targets: one "category:value" per line, blank lines and
 # # comments ignored. Each category maps onto a typed rule builder, so an entry
 # keeps its type instead of collapsing into a generic custom value.
+#
+# This is a portable, per-engagement alternative to the [custom] tables in
+# decon.toml — a file you can hand to a teammate or generate from a scope
+# document, rather than per-user configuration.
 _TARGET_CATEGORIES = ("domain", "netbios", "username", "hostname", "share")
 
 
-def load_known_targets(path: Path | str | None = None) -> dict[str, list[str]]:
-    """Parse a known_targets.txt file into per-category value lists.
+def load_targets(path: Path | str) -> dict[str, list[str]]:
+    """Parse a plain-text targets file into per-category value lists.
 
-    Returns empty lists when the file does not exist, so a caller can pass a
-    default path unconditionally.
+    Returns empty lists when the file does not exist, so a caller can point at
+    an optional per-engagement file unconditionally.
     """
-    target_path = Path(path) if path is not None else DEFAULT_TARGETS_PATH
+    target_path = Path(path).expanduser()
     targets: dict[str, list[str]] = {c: [] for c in _TARGET_CATEGORIES}
     if not target_path.exists():
         return targets
@@ -387,9 +389,9 @@ def load_known_targets(path: Path | str | None = None) -> dict[str, list[str]]:
     return targets
 
 
-def apply_known_targets(engine, path: Path | str | None = None) -> dict[str, list[str]]:
-    """Load a known_targets.txt file and register its rules on an engine."""
-    targets = load_known_targets(path)
+def apply_targets(engine, path: Path | str) -> dict[str, list[str]]:
+    """Load a targets file and register its rules on an engine."""
+    targets = load_targets(path)
     for category, add in (
         ("domain", engine.add_target_domains),
         ("hostname", engine.add_target_hostnames),

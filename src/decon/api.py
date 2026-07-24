@@ -3,19 +3,19 @@
 The CLI is the primary interface, but a sanitization proxy is often something
 you want to call from a script:
 
-    from decon import sanitize, desanitize, query_cloud_safe
+    from decon import sanitize, desanitize, ask_safely
 
     clean, mapping = sanitize(raw_notes)
-    answer, mapping = query_cloud_safe("What are two attack paths?")
+    answer, mapping = ask_safely("What are two attack paths?")
 
 `mapping` is placeholder -> original, which is the direction you need to
 restore text and the shape `desanitize()` expects. Note this is the inverse of
 `RedactionEngine.mapping`, which is keyed by the original value.
 
 Engagement identifiers can be supplied either through DECON's TOML config or a
-plain-text `known_targets.txt` (`category:value` per line, one of domain,
-netbios, username, hostname, share). The TOML config is applied first, so a
-targets file adds to it rather than replacing it.
+plain-text targets file (`category:value` per line, one of domain, netbios,
+username, hostname, share). The TOML config is applied first, so a targets file
+adds to it rather than replacing it.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ from decon.ask import ask as _ask
 from decon.audit import write_entry
 from decon.config import (
     apply_config_to_engine,
-    apply_known_targets,
+    apply_targets,
     load_config,
 )
 from decon.engine import RedactionEngine
@@ -37,7 +37,7 @@ __all__ = [
     "build_engine",
     "sanitize",
     "desanitize",
-    "query_cloud_safe",
+    "ask_safely",
 ]
 
 
@@ -47,7 +47,7 @@ def build_engine(
     profile: str | None = None,
     use_config: bool = True,
 ) -> RedactionEngine:
-    """Return an engine with config and any known_targets.txt rules applied.
+    """Return an engine with config and any targets-file rules applied.
 
     Set `use_config=False` for a deterministic engine that ignores the
     developer's own ~/.config/decon/decon.toml — useful in tests.
@@ -61,7 +61,7 @@ def build_engine(
             profile or os.environ.get("DECON_PROFILE"),
         )
     if targets_path is not None:
-        apply_known_targets(engine, targets_path)
+        apply_targets(engine, targets_path)
     return engine
 
 
@@ -90,7 +90,7 @@ def desanitize(text: str, mapping: dict[str, str]) -> str:
     return text
 
 
-def query_cloud_safe(
+def ask_safely(
     prompt: str,
     provider: str = DEFAULT_PROVIDER,
     targets_path: Path | str | None = None,
@@ -119,7 +119,7 @@ def query_cloud_safe(
     if audit:
         write_entry(
             report.unique_applied(),
-            mode="query_cloud_safe",
+            mode="ask_safely",
             sources=[f"<{provider}>"],
             quiet=True,
         )
