@@ -340,6 +340,68 @@ def init_config() -> Path:
     return path
 
 
+DEFAULT_TARGETS_PATH = Path.home() / "known_targets.txt"
+
+# Plain-text engagement targets: one "category:value" per line, blank lines and
+# # comments ignored. Each category maps onto a typed rule builder, so an entry
+# keeps its type instead of collapsing into a generic custom value.
+_TARGET_CATEGORIES = ("domain", "netbios", "username", "hostname", "share")
+
+
+def load_known_targets(path: Path | str | None = None) -> dict[str, list[str]]:
+    """Parse a known_targets.txt file into per-category value lists.
+
+    Returns empty lists when the file does not exist, so a caller can pass a
+    default path unconditionally.
+    """
+    target_path = Path(path) if path is not None else DEFAULT_TARGETS_PATH
+    targets: dict[str, list[str]] = {c: [] for c in _TARGET_CATEGORIES}
+    if not target_path.exists():
+        return targets
+
+    try:
+        lines = target_path.read_text(encoding="utf-8").splitlines()
+    except OSError as e:
+        raise ConfigError(f"Could not read targets file {target_path}: {e}") from e
+
+    for number, raw in enumerate(lines, start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        category, separator, value = line.partition(":")
+        category = category.strip().lower()
+        value = value.strip()
+        if not separator or not value:
+            raise ConfigError(
+                f"{target_path}:{number}: expected 'category:value', got {line!r}"
+            )
+        if category not in targets:
+            # Silently skipping would leave the value unredacted, which is the
+            # worst possible failure mode for a sanitizer.
+            known = ", ".join(_TARGET_CATEGORIES)
+            raise ConfigError(
+                f"{target_path}:{number}: unknown category {category!r} "
+                f"(expected one of: {known})"
+            )
+        targets[category].append(value)
+    return targets
+
+
+def apply_known_targets(engine, path: Path | str | None = None) -> dict[str, list[str]]:
+    """Load a known_targets.txt file and register its rules on an engine."""
+    targets = load_known_targets(path)
+    for category, add in (
+        ("domain", engine.add_target_domains),
+        ("hostname", engine.add_target_hostnames),
+        ("username", engine.add_target_usernames),
+        ("netbios", engine.add_target_netbios),
+        ("share", engine.add_target_shares),
+    ):
+        if targets[category]:
+            add(targets[category])
+    return targets
+
+
 def get_llm_config(config: dict) -> dict:
     """Extract LLM settings from config."""
     return config.get("llm", {})
