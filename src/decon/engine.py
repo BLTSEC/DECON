@@ -9,13 +9,27 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from decon.patterns import Rule, build_default_rules
+from decon.patterns import (
+    Rule,
+    _apply_group,
+    _rdns_hostname_apply,
+    build_default_rules,
+)
 
 AppliedRedaction = tuple[str, str, str]
 _HOST_PLACEHOLDER = re.compile(
     r"(?<![\w])(?:\[HOST_REDACTED_(\d+)\]|\[HOST_SHORT_REDACTED_(\d+)\]|"
     r"HOST_(\d+)(?:\.example\.internal)?)(?![.\w])"
 )
+# Any DECON-shaped placeholder, bracketed or bare. Deliberately looser than
+# patterns._TYPED_PLACEHOLDER (which validates an exact known type) so that a
+# reformatted or foreign placeholder is still recognised as one.
+_ANY_PLACEHOLDER = re.compile(
+    r"\[[A-Z][A-Z0-9_]*_REDACTED_\d+\]"
+    r"|(?<![\w])(?:[A-Z][A-Z0-9_]*_)?(?:HASH|KEY|DUMP|USER|PATH|SPN|SID)_\d+(?![\w])"
+    r"|(?<![\w])[A-Z][A-Z0-9_]*_REDACTED_\d+(?![\w])"
+)
+
 # RFC 2849 LDIF line folding: continuation lines start with a single space.
 _LDAP_FOLD = re.compile(r"\n (?=\S)")
 _LDAP_MARKER = re.compile(r"(?:^|\n)(?:dn|memberOf|ref): ", re.MULTILINE)
@@ -168,16 +182,52 @@ class RedactionEngine:
 
         return text
 
-    def unredact(self, text: str) -> str:
-        """Replace placeholders with original values using reverse mapping."""
+    def _reverse_lookup(self) -> dict[str, str]:
+        """Return placeholder -> original for everything this engine knows."""
         reverse = dict(self.reverse_mapping)
         for original, placeholder in self.mapping.items():
             if original != placeholder:
                 reverse.setdefault(placeholder, original)
+        return reverse
+
+    def unredact(self, text: str) -> str:
+        """Replace placeholders with original values using reverse mapping."""
+        reverse = self._reverse_lookup()
         # Sort by length (longest first) to avoid partial replacements
         for placeholder in sorted(reverse, key=len, reverse=True):
             text = text.replace(placeholder, reverse[placeholder])
         return text
+
+    def applied_for_unredaction(self, text: str) -> list[AppliedRedaction]:
+        """Return the mappings that unredact() would use on this text.
+
+        Lets a caller record what a restore actually re-materialized, rather
+        than the whole map.
+        """
+        reverse = self._reverse_lookup()
+        return [
+            ("restore", original, placeholder)
+            for placeholder, original in reverse.items()
+            if placeholder in text
+        ]
+
+    def unresolved_placeholders(self, text: str) -> list[str]:
+        """Return DECON-shaped placeholders in text that this engine cannot map.
+
+        After unredact(), anything still matching a placeholder pattern was
+        never restored — usually because it was reformatted (zero-padding
+        dropped, wrapped in markdown) or belongs to a different map.
+        """
+        known = set(self._reverse_lookup())
+        seen: set[str] = set()
+        unresolved: list[str] = []
+        for match in _ANY_PLACEHOLDER.finditer(text):
+            value = match.group(0)
+            if value in known or value in seen:
+                continue
+            seen.add(value)
+            unresolved.append(value)
+        return unresolved
 
     def enable_rule(self, name: str) -> None:
         """Enable a rule by name."""
@@ -283,6 +333,95 @@ class RedactionEngine:
                 mapping_key_fn=str.casefold,
             )
             self._add_rule(rule)
+
+    def _add_literal_target_rules(
+        self,
+        values: list[str],
+        *,
+        kind: str,
+        category: str,
+        placeholder_template: str,
+        priority: int,
+        apply_fn=None,
+    ) -> None:
+        """Register one case-insensitive literal rule per engagement identifier.
+
+        Shared by the typed target helpers below. Unlike add_custom_values(),
+        these keep their type: a hostname becomes a HOST placeholder and a
+        username a DOMAIN_USER placeholder, so the redacted text still
+        distinguishes a host from a user from a share.
+        """
+        for value in values:
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"target {kind} must be non-empty strings")
+            # Group 2 holds the identifier so hostname rules can share
+            # _rdns_hostname_apply, which replaces that group.
+            #
+            # Boundaries reject a dot only when it continues a domain label, so
+            # DC01 does not match inside DC01.corp.example.com but does match at
+            # the end of a sentence ("...readable by jsmith.").
+            pattern = re.compile(
+                r"(?<!\w)(?<!\w\.)"
+                r"()(" + re.escape(value) + r")"
+                r"(?!\w)(?!\.\w)",
+                re.IGNORECASE,
+            )
+            rule = Rule(
+                name=f"target_{kind}_{value}",
+                category=category,
+                priority=priority,
+                pattern=pattern,
+                placeholder_template=placeholder_template,
+                mapping_key_fn=str.casefold,
+                apply_fn=apply_fn or _apply_group(2),
+            )
+            self._add_rule(rule)
+
+    def add_target_hostnames(self, hostnames: list[str]) -> None:
+        """Add short/NetBIOS hostname rules (DC01, FILESERV01).
+
+        Runs after hostname_internal at the same priority, so a bare DC01
+        reuses the placeholder already assigned to DC01.corp.example.com
+        rather than minting a second identity for the same machine.
+        """
+        self._add_literal_target_rules(
+            hostnames,
+            kind="hostname",
+            category="hostname",
+            placeholder_template="[HOST_SHORT_REDACTED_{n:04d}]",
+            priority=44,
+            apply_fn=_rdns_hostname_apply,
+        )
+
+    def add_target_usernames(self, usernames: list[str]) -> None:
+        """Add bare username rules (jsmith, svc_backup)."""
+        self._add_literal_target_rules(
+            usernames,
+            kind="username",
+            category="ad_domain_user",
+            placeholder_template="DOMAIN_USER_{n:02d}",
+            priority=45,
+        )
+
+    def add_target_netbios(self, names: list[str]) -> None:
+        """Add short NetBIOS domain rules (ACME, EMBERGLASS)."""
+        self._add_literal_target_rules(
+            names,
+            kind="netbios",
+            category="domain",
+            placeholder_template="[DOMAIN_REDACTED_{n:04d}]",
+            priority=45,
+        )
+
+    def add_target_shares(self, shares: list[str]) -> None:
+        """Add SMB share name rules (SYSVOL, HR-Data)."""
+        self._add_literal_target_rules(
+            shares,
+            kind="share",
+            category="share",
+            placeholder_template="[SHARE_REDACTED_{n:04d}]",
+            priority=45,
+        )
 
     def export_map(self, path: str) -> None:
         """Export the current mapping atomically with owner-only permissions."""
