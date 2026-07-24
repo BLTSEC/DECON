@@ -1,6 +1,10 @@
 """Tests for individual pattern rules."""
 
 import re
+
+import pytest
+
+from decon.engine import RedactionEngine
 from decon.patterns import (
     build_default_rules,
     _valid_ipv4,
@@ -16,6 +20,7 @@ from decon.patterns import (
     _HOSTNAME_INTERNAL,
     _IPV6,
     _CONTEXT_SECRET,
+    _PROSE_SECRET,
     _KERBEROS_HASH,
     _SMB_NETBIOS_NAME,
     _SPN,
@@ -165,6 +170,73 @@ class TestContextSecret:
         assert m.group(2) == "Heartsbane"
 
 
+class TestProseSecret:
+    """Secrets stated in prose, the dominant shape in hand-written notes."""
+
+    @pytest.mark.parametrize(
+        "text,value",
+        [
+            ("The password is `Lantern-Cobalt-47!`.", "Lantern-Cobalt-47!"),
+            ('The password was "Summer2024!" until rotation.', "Summer2024!"),
+            ("Service account credential is 'Archive-Meteor-82!'", "Archive-Meteor-82!"),
+            ("The API key is `sk-abc123def456`.", "sk-abc123def456"),
+            ("Passphrase set to `correct-horse`.", "correct-horse"),
+        ],
+    )
+    def test_matches_delimited_prose_value(self, text, value):
+        m = _PROSE_SECRET.search(text)
+        assert m is not None
+        assert m.group(2) == value
+
+    # The required delimiter is what keeps ordinary prose from matching.
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "The password is stored in Vault.",
+            "The password is rotated quarterly by IT.",
+            "Credentials are managed centrally.",
+            "The secret is out of scope for this test.",
+            "The token is issued by the identity provider.",
+            "The API key is rotated monthly.",
+        ],
+    )
+    def test_no_false_positive_on_undelimited_prose(self, text):
+        assert _PROSE_SECRET.search(text) is None
+        assert RedactionEngine().redact(text) == text
+
+    def test_redacts_end_to_end(self):
+        text = "The password is `Lantern-Cobalt-47!`. LDAP identified the SID."
+        result = RedactionEngine().redact(text)
+        assert "Lantern-Cobalt-47" not in result
+        # surrounding prose is preserved
+        assert "LDAP identified the SID." in result
+
+    def test_does_not_run_to_end_of_line(self):
+        m = _PROSE_SECRET.search("The password is `hunter2` and the host is dc01.")
+        assert m is not None
+        assert m.group(2) == "hunter2"
+
+    # The shape found in real notes: no connector verb, and the value wrapped
+    # onto the following line.
+    def test_matches_across_a_line_break_without_verb(self):
+        text = (
+            "The assessment began with `EMBERGLASS\\analyst.demo` and the fake "
+            "password\n`Lantern-Cobalt-47!`. LDAP identified the domain SID as"
+        )
+        m = _PROSE_SECRET.search(text)
+        assert m is not None
+        assert m.group(2) == "Lantern-Cobalt-47!"
+        assert "Lantern-Cobalt-47" not in RedactionEngine().redact(text)
+
+    def test_value_may_not_span_lines(self):
+        assert _PROSE_SECRET.search("password `abc\ndef`") is None
+
+    def test_ignores_already_redacted_placeholder(self):
+        engine = RedactionEngine()
+        once = engine.redact("The password is `Lantern-Cobalt-47!`.")
+        assert engine.redact(once) == once
+
+
 class TestKerberosHash:
     # BUG-1: AS-REP hashes must be fully redacted
     def test_tgs_hash(self):
@@ -216,6 +288,46 @@ class TestSPN:
 
     def test_no_match_abbreviation(self):
         assert _SPN.search("SMB/WMI") is None
+
+    # The service class must not be the tail of a domain. Without this, impacket
+    # targets like domain.local/user:password matched as "local/user", which
+    # blocked ad_domain_user_slash and left the password unredacted.
+    def test_no_match_when_preceded_by_dot(self):
+        assert _SPN.search("emberglass.internal/analyst.demo") is None
+
+    def test_no_match_inside_impacket_target(self):
+        assert _SPN.search("corp.acme.com/jsmith:Summer2024!") is None
+
+
+class TestImpacketTargetCredentialLeak:
+    """domain/user:password targets must never leave the password behind."""
+
+    @pytest.mark.parametrize(
+        "text,secret",
+        [
+            (
+                "impacket-secretsdump "
+                "'emberglass.internal/analyst.demo:Lantern-Cobalt-47!'",
+                "Lantern-Cobalt-47!",
+            ),
+            (
+                "impacket-wmiexec corp.acme.com/jsmith:Summer2024!@10.0.5.23",
+                "Summer2024!",
+            ),
+            (
+                "impacket-psexec north.sevenkingdoms.local/jon.snow:Winter1sC0ming",
+                "Winter1sC0ming",
+            ),
+        ],
+    )
+    def test_password_is_redacted(self, text, secret):
+        result = RedactionEngine().redact(text)
+        assert secret not in result
+
+    def test_spn_still_redacts_after_fix(self):
+        result = RedactionEngine().redact("MSSQLSvc/FILESERV01.corp.acme.com:1433")
+        assert "FILESERV01" not in result
+        assert result.startswith("SPN_")
 
 
 class TestSmbNetbiosNameExtended:

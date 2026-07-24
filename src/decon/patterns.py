@@ -23,7 +23,7 @@ ApplyFn = Callable[
 
 _TYPED_PLACEHOLDER = re.compile(
     r"(?:"
-    r"\[(?:(?:IPV4|IPV6|MAC|EMAIL|PHONE|SECRET|HOST|HOST_SHORT|DOMAIN|CIDR)"
+    r"\[(?:(?:IPV4|IPV6|MAC|EMAIL|PHONE|SECRET|HOST|HOST_SHORT|DOMAIN|CIDR|SHARE)"
     r"_REDACTED|CUSTOM_(?:[A-Z0-9]+_)*REDACTED)_\d+\](?:/\d{1,3})?"
     r"|(?:PRIVATE_KEY_REDACTED|KERBEROS_HASH|SAM_DUMP|NTLMV2_HASH|"
     r"KERBEROS_KEY|JWT_REDACTED|API_KEY|DCC2_HASH|DPAPI_KEY|"
@@ -916,6 +916,24 @@ _CONTEXT_SECRET = re.compile(
     r"(?=$|[\s,)\]}])"
 )
 
+# Secrets stated in prose rather than as key=value — the dominant shape in
+# hand-written notes:
+#     The password is `Hunter2!`.
+#     ...and the fake password
+#     `Lantern-Cobalt-47!`.          <- keyword and value on separate lines
+# The connector verb is optional (real notes often omit it), so the delimiter —
+# a quote or markdown backtick — is what does the work: it stops the match
+# running away to end of line, and it keeps undelimited prose like "the password
+# is stored in Vault" from matching at all. Intervening whitespace may include a
+# newline, but the value itself may not span lines.
+# Group 1 = delimiter, group 2 = value, matching _context_secret_apply.
+_PROSE_SECRET = re.compile(
+    r"(?i)"
+    r"(?:password|passwd|passphrase|secret|api[_\s-]?key|token|credential)s?"
+    r"\s+(?:(?:is|was|are|were|set\s+to|changed\s+to)\s+)?"
+    r"(['\"`])([^'\"`\r\n]{3,})\1"
+)
+
 _DOMAIN_CONTEXT = re.compile(
     r"(?i)"
     r"(?:domain)"
@@ -1095,8 +1113,11 @@ _AD_DOMAIN_USER_BACKSLASH = re.compile(
 # Must be checked before ad_domain_user_slash (priority 24 vs 25).
 # Requires an FQDN instance name (at least one dot) to avoid false positives
 # on short abbreviations like CIFS/host (no dot) which fall through to ad_domain_user_slash.
+# The lookbehind excludes '.' so a ServiceClass can never be the tail of a domain:
+# without it, impacket targets like domain.local/user:password matched as
+# "local/user" and the surviving password was left unredacted.
 _SPN = re.compile(
-    r"(?<![\w\/])"
+    r"(?<![\w./])"
     r"[A-Za-z][A-Za-z0-9_-]{1,30}"                           # ServiceClass (e.g. CIFS, MSSQLSvc)
     r"/[a-zA-Z0-9](?:[a-zA-Z0-9-]*\.)+[a-zA-Z]{2,}"         # /host.domain (FQDN required)
     r"(?::[0-9]{1,5})?"                                       # optional :port
@@ -1257,6 +1278,14 @@ def build_default_rules() -> list[Rule]:
             category="secret",
             priority=15,
             pattern=_CONTEXT_SECRET,
+            placeholder_template="[SECRET_REDACTED_{n:04d}]",
+            apply_fn=_context_secret_apply,
+        ),
+        Rule(
+            name="prose_secret",
+            category="secret",
+            priority=15,
+            pattern=_PROSE_SECRET,
             placeholder_template="[SECRET_REDACTED_{n:04d}]",
             apply_fn=_context_secret_apply,
         ),
