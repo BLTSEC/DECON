@@ -330,6 +330,30 @@ class TestImpacketTargetCredentialLeak:
         assert result.startswith("SPN_")
 
 
+class TestUrlInMarkdown:
+    """Notes are Markdown, so a URL must not eat its surrounding formatting."""
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("see `https://example.internal/path` here", "see `URL_REDACTED_01` here"),
+            ("[link](https://dc01.corp.local/admin)", "[link](URL_REDACTED_01)"),
+        ],
+    )
+    def test_delimiters_are_preserved(self, text, expected):
+        assert RedactionEngine().redact(text) == expected
+
+    # A URL path must not be read as a domain/user pair, which split the URL
+    # across two placeholders and left the markdown unbalanced.
+    def test_url_path_is_not_a_domain_user(self):
+        report = RedactionEngine().redact_with_report(
+            "The portal redirected to `https://portal.example.internal/login`."
+        )
+        categories = {category for category, _, _ in report.unique_applied()}
+        assert categories == {"url"}
+        assert report.text.endswith("`.")
+
+
 class TestSmbNetbiosNameExtended:
     # BUG-7: machine names in CN= LDAP DN context must also be redacted
     def test_matches_cn_machine_name(self):
