@@ -222,6 +222,18 @@ def _normalize_finding(value: str) -> str:
     return value.strip().rstrip(".,;:!?")
 
 
+# A finding sometimes arrives with the key it was found under, e.g.
+# "token=[SECRET_REDACTED_0002]". The value is already redacted, so the line is
+# noise, but the prefix stops it matching the placeholder pattern.
+_KEYED_VALUE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,30}\s*[:=]\s*(.+)$")
+
+
+def _strip_key_prefix(value: str) -> str:
+    """Return the value half of a key=value finding, or the input unchanged."""
+    match = _KEYED_VALUE.match(value)
+    return match.group(1).strip() if match else value
+
+
 def _filter_placeholder_findings(response: str) -> str:
     """Remove FOUND: lines that reference placeholders or safe software names."""
     lines = []
@@ -234,7 +246,12 @@ def _filter_placeholder_findings(response: str) -> str:
         if not value:
             continue
         normalized = _normalize_finding(value)
-        if _PLACEHOLDER_RE.match(normalized) or _PLACEHOLDER_RE.match(value):
+        # Test the key-stripped form too, so "token=[SECRET_REDACTED_0002]" is
+        # recognised as already-redacted. Only the *filter* decision uses this;
+        # the reported value is left untouched, so nothing that should be
+        # redacted is silently rewritten.
+        candidates = {value, normalized, _normalize_finding(_strip_key_prefix(value))}
+        if any(_PLACEHOLDER_RE.match(c) for c in candidates if c):
             continue
         if _is_safe_software(normalized) or _is_safe_software(value):
             continue
