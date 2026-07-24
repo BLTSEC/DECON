@@ -446,6 +446,56 @@ trip them — DECON reports the refusal and its category rather than failing wit
 a traceback. The Claude provider also opts into server-side fallback, so a
 declined request is retried on another model automatically.
 
+## Using DECON as a library
+
+The CLI is the primary interface, but the proxy is often something you want to
+call from a script:
+
+```python
+from decon import sanitize, desanitize, query_cloud_safe
+
+clean, mapping = sanitize(raw_notes)
+restored = desanitize(clean, mapping)
+
+# Sanitize, ask a model, restore the answer — in one call
+answer, mapping = query_cloud_safe("What are two attack paths here?")
+```
+
+`mapping` is `{placeholder: original}` — the direction you need to restore
+text, and what `desanitize()` expects. Note this is the inverse of
+`RedactionEngine.mapping`, which is keyed by the original value.
+
+Engagement identifiers can come from a plain-text targets file instead of the
+TOML config — one `category:value` per line, where category is one of
+`domain`, `netbios`, `username`, `hostname`, or `share`:
+
+```text
+# known_targets.txt
+domain:acme.com
+netbios:ACME
+username:svc_backup
+hostname:DC01
+share:SYSVOL
+```
+
+```python
+clean, mapping = sanitize(text, "~/known_targets.txt")
+```
+
+The TOML config is applied first, so a targets file adds to it. An unknown
+category is an error rather than a silent skip — quietly ignoring a typo'd line
+would leave that value unredacted.
+
+For full control, build the engine yourself:
+
+```python
+from decon import build_engine
+
+engine = build_engine("~/known_targets.txt", profile="client-share")
+report = engine.redact_with_report(text)
+print(report.unique_applied())      # (category, original, placeholder) tuples
+```
+
 ## Pre-commit hook
 
 The strongest place to catch a leak is before it is ever committed. DECON ships
@@ -455,7 +505,7 @@ a hook definition, so guarding a notes vault is a few lines:
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/BLTSEC/DECON
-    rev: v0.3.0
+    rev: v0.4.0
     hooks:
       - id: decon
 ```
