@@ -452,25 +452,27 @@ The CLI is the primary interface, but the proxy is often something you want to
 call from a script:
 
 ```python
-from decon import sanitize, desanitize, query_cloud_safe
+from decon import sanitize, desanitize, ask_safely
 
 clean, mapping = sanitize(raw_notes)
 restored = desanitize(clean, mapping)
 
 # Sanitize, ask a model, restore the answer — in one call
-answer, mapping = query_cloud_safe("What are two attack paths here?")
+answer, mapping = ask_safely("What are two attack paths here?")
 ```
 
 `mapping` is `{placeholder: original}` — the direction you need to restore
 text, and what `desanitize()` expects. Note this is the inverse of
 `RedactionEngine.mapping`, which is keyed by the original value.
 
-Engagement identifiers can come from a plain-text targets file instead of the
-TOML config — one `category:value` per line, where category is one of
-`domain`, `netbios`, `username`, `hostname`, or `share`:
+### Per-engagement targets file
+
+Engagement identifiers can come from a plain-text file instead of the TOML
+config — one `category:value` per line, where category is one of `domain`,
+`netbios`, `username`, `hostname`, or `share`:
 
 ```text
-# known_targets.txt
+# acme-targets.txt
 domain:acme.com
 netbios:ACME
 username:svc_backup
@@ -479,19 +481,24 @@ share:SYSVOL
 ```
 
 ```python
-clean, mapping = sanitize(text, "~/known_targets.txt")
+clean, mapping = sanitize(text, "acme-targets.txt")
 ```
 
-The TOML config is applied first, so a targets file adds to it. An unknown
-category is an error rather than a silent skip — quietly ignoring a typo'd line
-would leave that value unredacted.
+Use this when the identifiers belong to the engagement rather than to you — a
+file you can generate from a scope document or hand to a teammate, versus
+`~/.config/decon/decon.toml`, which is per-user. The TOML config is applied
+first, so a targets file adds to it.
+
+An unknown category is an error rather than a silent skip, and the message
+names the file and line — quietly ignoring a typo'd `hostnames:DC01` would
+leave that value unredacted.
 
 For full control, build the engine yourself:
 
 ```python
 from decon import build_engine
 
-engine = build_engine("~/known_targets.txt", profile="client-share")
+engine = build_engine("acme-targets.txt", profile="client-share")
 report = engine.redact_with_report(text)
 print(report.unique_applied())      # (category, original, placeholder) tuples
 ```

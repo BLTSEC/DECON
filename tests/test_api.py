@@ -10,8 +10,8 @@ import pytest
 
 import decon
 import decon.ask as ask_mod
-from decon import build_engine, desanitize, query_cloud_safe, sanitize
-from decon.config import ConfigError, load_known_targets
+from decon import build_engine, desanitize, ask_safely, sanitize
+from decon.config import ConfigError, load_targets
 
 TARGETS = """\
 # Engagement identifiers
@@ -25,16 +25,16 @@ share:SYSVOL
 
 @pytest.fixture
 def targets_file(tmp_path):
-    path = tmp_path / "known_targets.txt"
+    path = tmp_path / "targets.txt"
     path.write_text(TARGETS)
     return path
 
 
 class TestPublicSurface:
-    def test_course_style_import_works(self):
+    def test_functions_are_exported(self):
         assert callable(decon.sanitize)
         assert callable(decon.desanitize)
-        assert callable(decon.query_cloud_safe)
+        assert callable(decon.ask_safely)
 
     def test_version_is_exported(self):
         assert decon.__version__
@@ -57,7 +57,7 @@ class TestSanitize:
         assert mapping
 
     # The mapping is placeholder -> original, the inverse of engine.mapping.
-    # desanitize() and the course API both depend on this direction.
+    # Getting this backwards makes desanitize() a silent no-op.
     def test_mapping_is_keyed_by_placeholder(self):
         clean, mapping = sanitize("Host dc01.corp.local", use_config=False)
         assert "dc01.corp.local" in mapping.values()
@@ -108,7 +108,7 @@ class TestKnownTargets:
     def test_comments_and_blank_lines_ignored(self, tmp_path):
         path = tmp_path / "t.txt"
         path.write_text("# a comment\n\n   \nhostname:DC01\n")
-        assert load_known_targets(path)["hostname"] == ["DC01"]
+        assert load_targets(path)["hostname"] == ["DC01"]
 
     # Silently skipping a bad category would leave the value unredacted, which
     # is the worst failure mode for a sanitizer.
@@ -116,19 +116,19 @@ class TestKnownTargets:
         path = tmp_path / "t.txt"
         path.write_text("hostnames:DC01\n")
         with pytest.raises(ConfigError, match="unknown category"):
-            load_known_targets(path)
+            load_targets(path)
 
     def test_malformed_line_is_rejected(self, tmp_path):
         path = tmp_path / "t.txt"
         path.write_text("DC01\n")
         with pytest.raises(ConfigError, match="expected 'category:value'"):
-            load_known_targets(path)
+            load_targets(path)
 
     def test_error_names_the_line_number(self, tmp_path):
         path = tmp_path / "t.txt"
         path.write_text("hostname:DC01\nbogus:x\n")
         with pytest.raises(ConfigError, match=":2:"):
-            load_known_targets(path)
+            load_targets(path)
 
 
 class TestQueryCloudSafe:
@@ -142,7 +142,7 @@ class TestQueryCloudSafe:
             return "Nothing found."
 
         monkeypatch.setitem(ask_mod._PROVIDERS, "claude", fake)
-        query_cloud_safe(self.SOURCE, use_config=False, audit=False)
+        ask_safely(self.SOURCE, use_config=False, audit=False)
         for secret in ("dc01.corp.local", "10.4.12.50", "jsmith"):
             assert secret not in sent["prompt"]
 
@@ -152,7 +152,7 @@ class TestQueryCloudSafe:
             "claude",
             lambda *a, **k: "Start at [HOST_REDACTED_0001].",
         )
-        answer, mapping = query_cloud_safe(
+        answer, mapping = ask_safely(
             self.SOURCE, use_config=False, audit=False
         )
         assert "dc01.corp.local" in answer
@@ -165,28 +165,28 @@ class TestQueryCloudSafe:
             "ollama",
             lambda *a, **k: seen.setdefault("called", True) and "ok",
         )
-        query_cloud_safe(
+        ask_safely(
             self.SOURCE, provider="ollama", use_config=False, audit=False
         )
         assert seen["called"]
 
     def test_unknown_provider_raises(self):
         with pytest.raises(decon.AskError, match="unknown provider"):
-            query_cloud_safe(self.SOURCE, provider="nope", use_config=False)
+            ask_safely(self.SOURCE, provider="nope", use_config=False)
 
     def test_audit_can_be_disabled(self, monkeypatch):
         from decon.audit import audit_path
 
         monkeypatch.setitem(ask_mod._PROVIDERS, "claude", lambda *a, **k: "ok")
-        query_cloud_safe(self.SOURCE, use_config=False, audit=False)
+        ask_safely(self.SOURCE, use_config=False, audit=False)
         assert not audit_path().exists()
 
     def test_audit_records_the_query(self, monkeypatch):
         from decon.audit import audit_path
 
         monkeypatch.setitem(ask_mod._PROVIDERS, "claude", lambda *a, **k: "ok")
-        query_cloud_safe(self.SOURCE, use_config=False, audit=True)
-        assert "query_cloud_safe" in audit_path().read_text()
+        ask_safely(self.SOURCE, use_config=False, audit=True)
+        assert "ask_safely" in audit_path().read_text()
 
 
 class TestBuildEngine:
