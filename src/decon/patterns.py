@@ -897,10 +897,13 @@ _JWT = re.compile(
 
 _AWS_KEY = re.compile(r"(?<![A-Z0-9])AKIA[0-9A-Z]{16}(?![A-Z0-9])")
 
+# Backticks terminate a URL: notes are written in Markdown, and `<url>` in
+# inline code would otherwise have its closing backtick swallowed into the
+# placeholder, leaving the surrounding formatting unbalanced.
 _URL = re.compile(
     r"https?://"
-    r"[^\s<>\"\x27\)\]]*"
-    r"[^\s<>\"\x27\)\].,;:!?\-]"
+    r"[^\s<>\"\x27\)\]`]*"
+    r"[^\s<>\"\x27\)\].,;:!?\-`]"
 )
 
 _CONTEXT_SECRET = re.compile(
@@ -1129,7 +1132,10 @@ _SPN = re.compile(
 # The hostname/username after / must start with lowercase to exclude protocol
 # abbreviations like SSDP/UPnP and LDAP path components like domain.local/DC=...
 _AD_DOMAIN_USER_SLASH = re.compile(
-    r"(?<![\w\/])"
+    # Excludes '.' for the same reason as _SPN: without it a match can begin
+    # mid-domain, so https://portal.example.internal/login reads as the
+    # domain/user pair "example.internal/login" and splits the URL in two.
+    r"(?<![\w./])"
     r"(?:"
     r"[A-Z][A-Z0-9]{3,14}"                              # CORP, INLANEFREIGHT (4+ uppercase)
     r"|[a-zA-Z0-9](?:[a-zA-Z0-9-]*\.)+[a-zA-Z]{2,}"     # megacorp.local (FQDN)
