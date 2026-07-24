@@ -182,8 +182,12 @@ class RedactionEngine:
 
         return text
 
-    def _reverse_lookup(self) -> dict[str, str]:
-        """Return placeholder -> original for everything this engine knows."""
+    def reverse_map(self) -> dict[str, str]:
+        """Return placeholder -> original for everything this engine knows.
+
+        This is the direction a caller needs to restore text, and the shape
+        the public sanitize()/desanitize() API hands back.
+        """
         reverse = dict(self.reverse_mapping)
         for original, placeholder in self.mapping.items():
             if original != placeholder:
@@ -192,7 +196,7 @@ class RedactionEngine:
 
     def unredact(self, text: str) -> str:
         """Replace placeholders with original values using reverse mapping."""
-        reverse = self._reverse_lookup()
+        reverse = self.reverse_map()
         # Sort by length (longest first) to avoid partial replacements
         for placeholder in sorted(reverse, key=len, reverse=True):
             text = text.replace(placeholder, reverse[placeholder])
@@ -204,7 +208,7 @@ class RedactionEngine:
         Lets a caller record what a restore actually re-materialized, rather
         than the whole map.
         """
-        reverse = self._reverse_lookup()
+        reverse = self.reverse_map()
         return [
             ("restore", original, placeholder)
             for placeholder, original in reverse.items()
@@ -218,7 +222,7 @@ class RedactionEngine:
         never restored — usually because it was reformatted (zero-padding
         dropped, wrapped in markdown) or belongs to a different map.
         """
-        known = set(self._reverse_lookup())
+        known = set(self.reverse_map())
         seen: set[str] = set()
         unresolved: list[str] = []
         for match in _ANY_PLACEHOLDER.finditer(text):
