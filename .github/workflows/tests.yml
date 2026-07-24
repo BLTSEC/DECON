@@ -1,0 +1,77 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install
+        run: pip install -e '.[dev]'
+
+      - name: Run tests
+        run: pytest -q
+
+      # The core tool must keep working with no third-party packages present.
+      # The [ask] extra is deliberately optional, so importing without it and
+      # running a redaction is a real regression check, not a formality.
+      - name: Verify zero-dependency core
+        run: |
+          python - <<'PY'
+          import importlib.util
+          for name in ("anthropic", "openai"):
+              assert importlib.util.find_spec(name) is None, f"{name} unexpectedly installed"
+          from decon import sanitize, desanitize
+          clean, mapping = sanitize("host dc01.corp.local", use_config=False)
+          assert "dc01.corp.local" not in clean, clean
+          assert desanitize(clean, mapping) == "host dc01.corp.local"
+          print("core works with stdlib only")
+          PY
+
+  hook:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install -e .
+
+      # The pre-commit entry must fail on data that needs redaction and pass on
+      # data that does not; a hook that never fails is worse than no hook.
+      - name: Hook fails on unredacted data
+        run: |
+          if decon --check --no-audit "tests/fixtures/emberglass/02 - AD Enumeration.md"; then
+            echo "::error::--check passed on a file containing sensitive data"
+            exit 1
+          fi
+
+      - name: Hook passes on clean data
+        run: |
+          printf '# Notes\n\nNothing sensitive here.\n' > clean.md
+          decon --check --no-audit clean.md
