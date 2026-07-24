@@ -224,6 +224,26 @@ Precedence is predictable:
 [rules] -> selected profile -> --enable / --disable
 ```
 
+Set every built-in rule at once with `all`, then override individually. Within a
+layer `all` is applied first, so per-rule keys win:
+
+```toml
+[profiles.ctf]
+all = false          # lab infrastructure is public — redact nothing built-in
+
+[profiles.network-only]
+all = false
+ipv4 = true          # ...except addresses
+ipv6 = true
+```
+
+Prefer this over listing every rule name to disable: a deny-list silently stops
+covering rules added in later releases, while `all` states the intent once.
+
+`all` applies to built-in rules only. Values you declare under `[custom]` are
+explicit instructions and keep redacting regardless, so `all = false` never
+stops protecting your own identifiers.
+
 ```bash
 decon --profile client-share report.txt
 DECON_PROFILE=client-share decon report.txt

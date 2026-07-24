@@ -198,3 +198,51 @@ class TestApplyConfig:
         }
         with pytest.raises(ConfigError, match="Invalid replacement"):
             apply_config_to_engine(RedactionEngine(), config)
+
+
+class TestAllRulesSwitch:
+    """`all` states intent once instead of a deny-list that drifts."""
+
+    def test_all_false_disables_every_builtin(self):
+        engine = RedactionEngine()
+        apply_config_to_engine(engine, {"profiles": {"ctf": {"all": False}}}, "ctf")
+        assert [r.name for r in engine.rules if r.enabled] == []
+
+    def test_all_true_enables_every_builtin(self):
+        engine = RedactionEngine()
+        apply_config_to_engine(
+            engine, {"rules": {"ipv4": False}, "profiles": {"x": {"all": True}}}, "x"
+        )
+        assert all(r.enabled for r in engine.rules)
+
+    # Per-rule keys must win over the blanket, so it stays a starting point.
+    def test_per_rule_overrides_win(self):
+        engine = RedactionEngine()
+        apply_config_to_engine(
+            engine, {"profiles": {"x": {"all": False, "ipv4": True}}}, "x"
+        )
+        assert [r.name for r in engine.rules if r.enabled] == ["ipv4"]
+
+    def test_works_in_the_global_rules_table(self):
+        engine = RedactionEngine()
+        apply_config_to_engine(engine, {"rules": {"all": False}})
+        assert [r.name for r in engine.rules if r.enabled] == []
+
+    # Values under [custom] are explicit instructions, not built-in guesses.
+    def test_custom_values_survive_all_false(self):
+        engine = RedactionEngine()
+        apply_config_to_engine(
+            engine,
+            {
+                "profiles": {"ctf": {"all": False}},
+                "custom": {"values_nocase": ["bltsec"]},
+            },
+            "ctf",
+        )
+        assert "bltsec" not in engine.redact("user bltsec here")
+
+    def test_non_boolean_all_is_rejected(self):
+        with pytest.raises(ConfigError, match="true or false"):
+            apply_config_to_engine(
+                RedactionEngine(), {"profiles": {"y": {"all": "yes"}}}, "y"
+            )

@@ -367,7 +367,13 @@ def _smb_user_pass_apply(
     def _replace(match: re.Match[str]) -> str:
         user = match.group(1)
         password = match.group(2)
-        for value in (user, password):
+        # The two halves are different kinds of thing, so they get different
+        # placeholder namespaces — a username is an identity, not a credential.
+        kinds = (
+            (user, "ad_domain_user", "DOMAIN_USER_{n:02d}"),
+            (password, rule.category, rule.placeholder_template),
+        )
+        for value, category, template in kinds:
             mapping_key = rule.mapping_key_fn(value) if rule.mapping_key_fn else value
             if (
                 mapping_key not in mapping
@@ -375,8 +381,8 @@ def _smb_user_pass_apply(
                 and not _is_typed_placeholder(value)
             ):
                 placeholder = _allocate_placeholder(
-                    rule.category,
-                    rule.placeholder_template,
+                    category,
+                    template,
                     counters,
                     placeholder_values,
                 )
@@ -387,7 +393,7 @@ def _smb_user_pass_apply(
         pass_ph = mapping.get(pass_key, password)
         if applied is not None:
             if user_ph != user:
-                applied.append((rule.category, user, user_ph))
+                applied.append(("ad_domain_user", user, user_ph))
             if pass_ph != password:
                 applied.append((rule.category, password, pass_ph))
         prefix = match.group(0)[: match.start(1) - match.start(0)]
@@ -440,21 +446,30 @@ def _cli_flag_apply(
         if value in placeholder_values or _is_typed_placeholder(value):
             return match.group(0)
 
+        # A value after -u is a username, not a credential. Emitting it as
+        # SECRET says the wrong thing about what it is, and splits one identity
+        # across two placeholder namespaces when the same account also appears
+        # as DOMAIN\user elsewhere.
+        if flag in _CLI_USER_FLAGS:
+            category, template = "ad_domain_user", "DOMAIN_USER_{n:02d}"
+        else:
+            category, template = rule.category, rule.placeholder_template
+
         if mapping_key in mapping:
             placeholder = mapping[mapping_key]
             if placeholder == mapping_key:
                 return match.group(0)
         else:
             placeholder = _allocate_placeholder(
-                rule.category,
-                rule.placeholder_template,
+                category,
+                template,
                 counters,
                 placeholder_values,
             )
             mapping[mapping_key] = placeholder
 
         if applied is not None:
-            applied.append((rule.category, value, placeholder))
+            applied.append((category, value, placeholder))
         full = match.group(0)
         start = full[: match.start(group) - match.start(0)]
         end = full[match.end(group) - match.start(0) :]
@@ -1047,6 +1062,10 @@ _CLI_FLAG_SECRET = re.compile(
     r'(?:"([^"\r\n]+)"|\'([^\'\r\n]+)\'|([^\s\'\"]+))'
     r"(?=\s|$)"
 )
+
+# Flags whose value is an identity rather than a credential. -U is excluded:
+# in netexec/smbclient it carries user%password, handled by smb_user_pass.
+_CLI_USER_FLAGS = frozenset({"-u", "-l", "--user", "--login", "--username"})
 
 # Values that look like file paths, template placeholders, or flags — not secrets
 _CLI_FLAG_SKIP_RE = re.compile(

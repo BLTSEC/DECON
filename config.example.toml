@@ -1,7 +1,8 @@
 default_profile = "standard"
 
 [rules]
-# Toggle built-in rules on/off globally
+# Toggle built-in rules on/off globally.
+# all = false        # disable every built-in rule; per-rule keys override it
 # ipv4 = true
 # email = true
 # mac = false
@@ -60,3 +61,8 @@ hostname_internal = true
 [profiles.internal]
 ipv4 = false
 mac = false
+
+[profiles.ctf]
+# Lab infrastructure is public — redact nothing built-in. Values under [custom]
+# still apply, so your own identifiers stay protected.
+all = false

@@ -65,6 +65,14 @@ shares = []          # SMB share names, e.g. "SYSVOL"
 """
 
 
+# Reserved key in [rules] and in any profile: sets every BUILT-IN rule at once.
+# A deny-list profile silently drifts as rules are added -- listing 33 rule names
+# stops covering the rule added next release. `all` states the intent instead.
+# Scoped to built-ins: values declared under [custom] are explicit instructions
+# and still apply, so `all = false` never stops redacting your own identifiers.
+ALL_RULES = "all"
+
+
 class ConfigError(ValueError):
     """Raised when the DECON config file is invalid."""
 
@@ -145,7 +153,7 @@ def apply_config_to_engine(engine, config: dict, profile: str | None = None) -> 
     known_rules = {rule.name for rule in engine.rules}
     global_rules = _require_table(config, "rules")
     for name, enabled in global_rules.items():
-        if name not in known_rules:
+        if name != ALL_RULES and name not in known_rules:
             raise ConfigError(f"Unknown rule in config: {name}")
         if not isinstance(enabled, bool):
             raise ConfigError(f"Rule {name} must be true or false")
@@ -162,21 +170,31 @@ def apply_config_to_engine(engine, config: dict, profile: str | None = None) -> 
                     name,
                     prefix=f"profiles.{profile_name}",
                 )
-            elif name not in known_rules:
+            elif name != ALL_RULES and name not in known_rules:
                 raise ConfigError(
                     f"Unknown rule in profile {profile_name}: {name}"
                 )
-            elif not isinstance(enabled, bool):
+            elif name != "custom_values_extra" and not isinstance(enabled, bool):
                 raise ConfigError(
                     f"Rule {name} in profile {profile_name} must be true or false"
                 )
 
-    rule_overrides = resolve_profile(config, effective_profile)
+    # Apply layer by layer ([rules], then the profile) rather than from a
+    # flattened dict, so precedence holds in both directions: a profile's
+    # `all = true` must be able to re-enable a rule the global table turned off.
+    # Within a layer, `all` lands first so its own per-rule keys override it --
+    # `all = false` plus `ipv4 = true` yields ipv4 only.
+    layers = [global_rules]
+    if effective_profile != "standard":
+        layers.append(profiles[effective_profile])
 
-    # Apply rule enable/disable from config
-    for rule in engine.rules:
-        if rule.name in rule_overrides:
-            rule.enabled = rule_overrides[rule.name]
+    for layer in layers:
+        blanket = layer.get(ALL_RULES)
+        for rule in engine.rules:
+            if blanket is not None:
+                rule.enabled = blanket
+            if rule.name in layer:
+                rule.enabled = layer[rule.name]
 
     # Custom literal values
     custom = _require_table(config, "custom")

@@ -786,6 +786,30 @@ class TestLLMPostFilterNormalization:
         raw = "FOUND: [IPV4_REDACTED_0001] - used as target"
         assert _filter_placeholder_findings(raw) == "CLEAN"
 
+    # Observed from a real qwen3.5:9b review run: the model reports a finding
+    # with the key it was found under. The value is already redacted, so the
+    # line is pure triage noise.
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "FOUND: token=[SECRET_REDACTED_0002]",
+            "FOUND: owner=[EMAIL_REDACTED_0002]",
+            "FOUND: password: [SECRET_REDACTED_0001]",
+        ],
+    )
+    def test_keyed_placeholder_filtered(self, raw):
+        from decon.llm import _filter_placeholder_findings
+
+        assert _filter_placeholder_findings(raw) == "CLEAN"
+
+    # Stripping the key must only inform the filter decision, never rewrite a
+    # finding that should still be redacted.
+    def test_keyed_real_value_is_kept_verbatim(self):
+        from decon.llm import _filter_placeholder_findings
+
+        result = _filter_placeholder_findings("FOUND: password=hunter2")
+        assert "password=hunter2" in result
+
     def test_ip_with_protocol_prefix_filtered(self):
         from decon.llm import _filter_placeholder_findings
 
@@ -1661,13 +1685,42 @@ class TestMajorRegressionFixes:
         ):
             assert value not in result
 
+    # The two halves must stay distinct, and carry the right kind: a username
+    # is an identity, not a credential. Emitting both as SECRET said the wrong
+    # thing and split one account across two namespaces when it also appeared
+    # as DOMAIN\user elsewhere.
     def test_smb_user_and_password_keep_separate_placeholders(self):
         result = RedactionEngine().redact(
             "smbclient -U admin%P@ssword1 //server/share"
         )
-        assert (
-            "-U [SECRET_REDACTED_0001]%[SECRET_REDACTED_0002]" in result
-        )
+        assert "-U DOMAIN_USER_01%[SECRET_REDACTED_0001]" in result
+        assert "admin" not in result
+        assert "P@ssword1" not in result
+
+    @pytest.mark.parametrize(
+        "command,expected",
+        [
+            ("nxc smb 10.0.0.1 -u analyst.demo -p Hunter2!", "-u DOMAIN_USER_01"),
+            ("netexec ldap dc --username svc_sql --password x1", "--username DOMAIN_USER_01"),
+            ("smbclient -L srv -l jsmith", "-l DOMAIN_USER_01"),
+        ],
+    )
+    def test_user_flags_produce_user_placeholders(self, command, expected):
+        assert expected in RedactionEngine().redact(command)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "nxc smb 10.0.0.1 -u bob -p Hunter2!",
+            "impacket-psexec --password Passw0rd target",
+            "secretsdump -H aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0",
+        ],
+    )
+    def test_credential_flags_still_produce_secrets(self, command):
+        result = RedactionEngine().redact(command)
+        assert "DOMAIN_USER" not in result.split("-p")[-1]
+        for secret in ("Hunter2!", "Passw0rd"):
+            assert secret not in result
 
     def test_exported_map_is_owner_only(self, tmp_path):
         path = tmp_path / "map.json"
