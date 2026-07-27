@@ -305,9 +305,10 @@ echo "Investigate [IPV4_REDACTED_0001]:443" \
 
 > [!CAUTION]
 > Maps, saved sessions, and the audit log all contain the original sensitive
-> values. DECON writes them atomically with mode `0600` inside an owner-only
-> directory, and this repository ignores `map.json` and `*.decon-map.json`.
-> Never commit, upload, or share any of them.
+> values. Maps and sessions are replaced atomically; every persisted file is
+> forced to mode `0600`, and DECON's state directory is owner-only. This
+> repository ignores `map.json` and `*.decon-map.json`. Never commit, upload, or
+> share any of them.
 
 Case-insensitive and canonicalized values—such as hostname case variants,
 equivalent IPv6 spellings, and alternate MAC formats—share a placeholder. A
@@ -389,9 +390,11 @@ ollama pull qwen3.5:9b
 decon --llm scan.txt
 ```
 
-The LLM is a **reviewer, not an automatic redactor**. Findings are shown on
-stderr in non-interactive runs. In an interactive terminal, you can choose
-which findings to redact.
+The LLM is normally a **reviewer, not an automatic redactor**. Findings are
+shown on stderr in non-interactive runs. In an interactive terminal, you can
+choose which findings to redact. The exception is `--llm --ask`: anything the
+local reviewer flags is automatically redacted before the prompt can be sent to
+the selected provider.
 
 LLM review also works with:
 
@@ -419,9 +422,10 @@ host = "http://host.docker.internal:11434"
 
 ## Asking an LLM directly
 
-`--ask` closes the loop: DECON redacts your input, sends the sanitized text with
-your question, then restores the real values in the answer. You write and read
-real infrastructure; the provider only ever sees placeholders.
+`--ask` closes the loop: DECON redacts both your question and input with one
+shared mapping, sends only those sanitized strings, then restores the real
+values in the answer. You write and read real infrastructure while the provider
+reasons over stable placeholders.
 
 ```bash
 decon --ask "What are two attack paths here?" scan.txt
@@ -452,8 +456,10 @@ claude = "claude-opus-5"
 ollama = "qwen3.5:9b"
 ```
 
-DECON warns before sending an unusually large document, since it cannot know a
-provider's context limit or your budget.
+DECON warns before sending an unusually large question and document, since it
+cannot know a provider's context limit or your budget. OpenAI requests set
+`store=false` to avoid retaining a reusable Responses API object; normal
+provider abuse-monitoring and account-level retention policies may still apply.
 
 > [!NOTE]
 > Redaction reduces exposure; it does not prove the text is safe to send. Review
@@ -509,9 +515,9 @@ file you can generate from a scope document or hand to a teammate, versus
 `~/.config/decon/decon.toml`, which is per-user. The TOML config is applied
 first, so a targets file adds to it.
 
-An unknown category is an error rather than a silent skip, and the message
-names the file and line — quietly ignoring a typo'd `hostnames:DC01` would
-leave that value unredacted.
+An unknown category or missing file is an error rather than a silent skip, and
+parse errors name the file and line — quietly ignoring a typo'd
+`hostnames:DC01` or `acme-targtes.txt` would leave values unredacted.
 
 For full control, build the engine yourself:
 
@@ -632,6 +638,7 @@ python -m venv .venv
 source .venv/bin/activate
 pip install -e '.[dev]'
 pytest -q
+ruff check src tests
 ```
 
 ## License

@@ -2,7 +2,7 @@
 
 This completes the proxy loop: the operator writes prompts about real
 infrastructure and reads answers about real infrastructure, while the provider
-only ever sees placeholders.
+receives only the engine-sanitized prompt.
 
 Only the Ollama provider works with the standard library. The Claude and OpenAI
 providers use their official SDKs, installed as an optional extra so DECON's
@@ -117,6 +117,9 @@ def _ask_openai(prompt: str, model: str, max_tokens: int, **_: object) -> str:
             max_output_tokens=max_tokens,
             instructions=SYSTEM_PROMPT,
             input=prompt,
+            # DECON is explicitly a data-minimization boundary. Do not retain a
+            # reusable Responses API object after this one-shot request.
+            store=False,
         )
     except openai.APIStatusError as e:
         raise AskError(f"OpenAI API error: {e}") from e
@@ -163,7 +166,14 @@ def _ask_ollama(
     except (ValueError, json.JSONDecodeError) as e:
         raise AskError(f"unexpected response from Ollama: {e}") from e
 
-    text = data.get("message", {}).get("content", "")
+    if not isinstance(data, dict):
+        raise AskError("unexpected response from Ollama: expected a JSON object")
+    message = data.get("message", {})
+    if not isinstance(message, dict):
+        raise AskError("unexpected response from Ollama: invalid message object")
+    text = message.get("content", "")
+    if not isinstance(text, str):
+        raise AskError("unexpected response from Ollama: message content is not text")
     if not text.strip():
         raise AskError("the model returned an empty response")
     return text
@@ -204,11 +214,25 @@ def ask(
     The caller is responsible for redacting `document` first and for restoring
     the reply afterwards — this function never sees the unredacted text.
     """
-    if provider not in _PROVIDERS:
+    if not isinstance(provider, str) or provider not in _PROVIDERS:
         known = ", ".join(sorted(_PROVIDERS))
         raise AskError(f"unknown provider {provider!r}. Choose one of: {known}")
+    if not isinstance(question, str):
+        raise AskError("the question must be a string")
     if not question.strip():
         raise AskError("the question must not be empty")
+    if not isinstance(document, str):
+        raise AskError("the document must be a string")
+    if model is not None and (not isinstance(model, str) or not model.strip()):
+        raise AskError("the model must be a non-empty string")
+    if not isinstance(host, str) or not host.strip():
+        raise AskError("the host must be a non-empty string")
+    if (
+        not isinstance(max_tokens, int)
+        or isinstance(max_tokens, bool)
+        or max_tokens <= 0
+    ):
+        raise AskError("max_tokens must be a positive integer")
 
     return _PROVIDERS[provider](
         _build_prompt(question, document),

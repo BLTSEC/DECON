@@ -3,10 +3,9 @@
 import json
 import sys
 from io import StringIO
-from pathlib import Path
 from unittest.mock import patch
 
-from decon.cli import main, _prompt_llm_review
+from decon.cli import _prompt_llm_review, main
 from decon.engine import RedactionEngine
 from decon.llm import parse_findings
 
@@ -26,6 +25,17 @@ class TestCLIBasic:
         captured = capsys.readouterr()
         assert "ipv4" in captured.out
         assert "email" in captured.out
+
+    def test_list_rules_applies_cli_overrides(self, capsys):
+        assert main(["--list-rules", "--disable", "ipv4"]) == 0
+        ipv4_line = next(
+            line for line in capsys.readouterr().out.splitlines() if "ipv4" in line
+        )
+        assert "disabled" in ipv4_line
+
+    def test_list_rules_rejects_ignored_file_input(self, capsys):
+        assert main(["--list-rules", "notes.txt"]) == 1
+        assert "informational action" in capsys.readouterr().err
 
     def test_stdin_redaction(self, monkeypatch, capsys):
         monkeypatch.setattr("sys.stdin", StringIO("Server 10.4.12.50 is up\n"))

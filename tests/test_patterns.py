@@ -1,38 +1,36 @@
 """Tests for individual pattern rules."""
 
-import re
 
 import pytest
 
 from decon.engine import RedactionEngine
 from decon.patterns import (
-    build_default_rules,
-    _valid_ipv4,
-    _luhn_check,
-    _IPV4,
-    _CIDR,
-    _EMAIL,
-    _MAC,
-    _JWT,
+    _AD_DOMAIN_USER_SLASH,
     _AWS_KEY,
-    _SSN,
-    _PHONE,
-    _HOSTNAME_INTERNAL,
-    _IPV6,
+    _CIDR,
     _CONTEXT_SECRET,
-    _PROSE_SECRET,
+    _EMAIL,
+    _HOSTNAME_INTERNAL,
+    _IMPACKET_STATUS_USER,
+    _IPV4,
+    _IPV6,
+    _JWT,
     _KERBEROS_HASH,
-    _SMB_NETBIOS_NAME,
-    _SPN,
+    _LDAP_CN_LOWERCASE_USER,
+    _LDAP_CN_USERS_MEMBER,
+    _LDAP_COMMENT_USER,
+    _LDAP_DESCRIPTION,
     _LDAP_DN_DOMAIN,
     _LDAP_SAMACCOUNTNAME,
-    _AD_DOMAIN_USER_SLASH,
-    _IMPACKET_STATUS_USER,
-    _LDAP_CN_LOWERCASE_USER,
-    _LDAP_COMMENT_USER,
+    _MAC,
     _NETEXEC_SPRAY_PASSWORD,
-    _LDAP_DESCRIPTION,
-    _LDAP_CN_USERS_MEMBER,
+    _PHONE,
+    _PROSE_SECRET,
+    _SMB_NETBIOS_NAME,
+    _SPN,
+    _SSN,
+    _luhn_check,
+    _valid_ipv4,
 )
 
 
@@ -43,8 +41,7 @@ class TestIPv4Pattern:
     def test_no_match_partial(self):
         """Should not match inside longer number sequences."""
         assert _IPV4.search("10.0.0.1") is not None
-        match = _IPV4.search("1.2.3.4.5")
-        # Might partially match — that's ok, validator filters
+        assert _IPV4.search("1.2.3.4.5") is None
 
     def test_boundary(self):
         m = _IPV4.search("addr=10.4.12.50 port=443")

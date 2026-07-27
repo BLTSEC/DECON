@@ -10,18 +10,18 @@ from io import StringIO
 
 import pytest
 
-from decon.engine import RedactionEngine
 from decon.audit import audit_path
-from decon.state import session_path
+from decon.cli import main
+from decon.engine import RedactionEngine
+from decon.patterns import (
+    _AD_DOMAIN_USER_BACKSLASH as _AD_DOMAIN_USER,
+)
 from decon.patterns import (
     _NTLM_HASH,
-    _AD_DOMAIN_USER_BACKSLASH as _AD_DOMAIN_USER,
     _PRIVATE_KEY,
     _UNC_PATH,
-    build_default_rules,
 )
-from decon.cli import main
-
+from decon.state import session_path
 
 # ---------------------------------------------------------------------------
 # New pattern tests
@@ -1960,6 +1960,22 @@ class TestAuditLog:
         assert stat.S_IMODE(notes.stat().st_mode) == 0o755
         assert stat.S_IMODE(log.stat().st_mode) == 0o600
 
+    def test_existing_configured_log_is_tightened(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        log = tmp_path / "audit.jsonl"
+        log.write_text("")
+        os.chmod(log, 0o644)
+        config = tmp_path / "decon.toml"
+        config.write_text(f'[audit]\npath = "{log}"\n')
+        monkeypatch.setattr("decon.config.DEFAULT_CONFIG_PATH", config)
+
+        monkeypatch.setattr("sys.stdin", StringIO("host dc01.corp.local\n"))
+        assert main([]) == 0
+        capsys.readouterr()
+
+        assert stat.S_IMODE(log.stat().st_mode) == 0o600
+
     def test_batch_mode_records_each_file(self, tmp_path, monkeypatch, capsys):
         a = tmp_path / "a.txt"
         b = tmp_path / "b.txt"
@@ -2012,6 +2028,40 @@ class TestSessionHygiene:
         broken.write_text("this is not = valid toml [[[\n")
         monkeypatch.setattr("decon.config.DEFAULT_CONFIG_PATH", broken)
         assert main(["--list-sessions"]) == 0
+
+    def test_restore_survives_a_broken_config(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.setattr("sys.stdin", StringIO("host dc01.corp.local\n"))
+        assert main(["--session", "recovery"]) == 0
+        redacted = capsys.readouterr().out
+
+        broken = tmp_path / "decon.toml"
+        broken.write_text("this is not = valid toml [[[\n")
+        monkeypatch.setattr("decon.config.DEFAULT_CONFIG_PATH", broken)
+        monkeypatch.setattr("sys.stdin", StringIO(redacted))
+
+        assert main(["--restore", "recovery"]) == 0
+        captured = capsys.readouterr()
+        assert "dc01.corp.local" in captured.out
+        assert "audit logging is disabled" in captured.err
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            ["--forget", "one", "--forget-all"],
+            ["--list-sessions", "--forget-all"],
+            ["--forget", "one", "notes.txt"],
+        ],
+    )
+    def test_session_admin_rejects_conflicting_work(self, args, capsys):
+        assert main(args) == 1
+        error = capsys.readouterr().err
+        assert "standalone" in error or "mutually exclusive" in error
+
+    def test_restore_rejects_output_dir(self, capsys):
+        assert main(["--restore", "last", "notes.txt", "--output-dir", "out"]) == 1
+        assert "--output-dir cannot be used" in capsys.readouterr().err
 
 
 class TestUnresolvedPlaceholders:

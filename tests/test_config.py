@@ -1,7 +1,7 @@
 """Tests for config loading and profile resolution."""
 
-import tempfile
 import os
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -165,6 +165,7 @@ class TestApplyConfig:
             ({"ask": {"models": {"gemini": "x"}}}, "Unknown provider"),
             ({"ask": {"models": {"claude": ""}}}, "ask.models.claude"),
             ({"ask": {"max_tokens": 0.5}}, "ask.max_tokens"),
+            ({"ask": {"max_tokens": 0}}, "positive integer"),
             ({"ask": {"warn_chars": -1}}, "ask.warn_chars"),
         ],
     )

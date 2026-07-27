@@ -34,6 +34,9 @@ jobs:
       - name: Run tests
         run: pytest -q
 
+      - name: Lint
+        run: ruff check src tests
+
       # The core tool must keep working with no third-party packages present.
       # The [ask] extra is deliberately optional, so importing without it and
       # running a redaction is a real regression check, not a formality.
@@ -49,6 +52,41 @@ jobs:
           assert desanitize(clean, mapping) == "host dc01.corp.local"
           print("core works with stdlib only")
           PY
+
+  provider-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      # Exercise the oldest SDK versions declared compatible in pyproject.toml.
+      # This catches provider code that starts using an API newer than our floor.
+      - name: Install provider dependency floors
+        run: |
+          pip install pytest ruff anthropic==0.116.0 openai==1.66.0
+          pip install -e . --no-deps
+
+      - name: Verify provider SDK contracts
+        run: |
+          python - <<'PY'
+          import inspect
+          import anthropic
+          import openai
+
+          claude = anthropic.Anthropic(api_key="test")
+          assert "fallbacks" in inspect.signature(claude.beta.messages.stream).parameters
+
+          client = openai.OpenAI(api_key="test")
+          assert hasattr(client, "responses")
+          assert "store" in inspect.signature(client.responses.create).parameters
+          print("provider SDK floors expose the APIs DECON uses")
+          PY
+
+      - name: Run provider tests
+        run: pytest -q tests/test_ask.py tests/test_api.py
 
   hook:
     runs-on: ubuntu-latest

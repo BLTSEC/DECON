@@ -34,10 +34,10 @@ Homepage = "https://github.com/BLTSEC/DECON"
 Repository = "https://github.com/BLTSEC/DECON"
 
 [project.optional-dependencies]
-dev = ["pytest>=7"]
+dev = ["pytest>=7", "ruff>=0.12"]
 # Cloud providers for --ask. Kept optional so the core tool stays
 # dependency-free; the Ollama provider needs nothing beyond the stdlib.
-ask = ["anthropic>=0.40", "openai>=1.40"]
+ask = ["anthropic>=0.116", "openai>=1.66"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/decon"]
@@ -45,3 +45,11 @@ packages = ["src/decon"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+ignore = ["E501"]

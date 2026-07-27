@@ -67,6 +67,10 @@ def write_entry(
             0o600,
         )
         try:
+            # The creation mode does not affect an existing file. Tighten it on
+            # every append so a configured log cannot silently remain group- or
+            # world-readable after being created elsewhere.
+            os.fchmod(fd, 0o600)
             os.write(fd, line.encode("utf-8"))
         finally:
             os.close(fd)

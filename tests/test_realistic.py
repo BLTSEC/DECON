@@ -7,11 +7,10 @@ consistency guarantees.
 
 from __future__ import annotations
 
-import json
-import tempfile
 import os
-from decon.engine import RedactionEngine
+import tempfile
 
+from decon.engine import RedactionEngine
 
 # ---------------------------------------------------------------------------
 # Helper
@@ -478,7 +477,7 @@ class TestPlaceholderCollision:
         """An IP redacted by IPv4 rule should not be re-matched by later rules."""
         engine = _engine()
         # This IP gets a typed placeholder from the IPv4 rule (priority 40).
-        result = engine.redact("Host 192.168.1.1 is down")
+        engine.redact("Host 192.168.1.1 is down")
         ip_placeholder = engine.mapping["192.168.1.1"]
         # The placeholder itself must not create a new mapping entry.
         assert ip_placeholder not in engine.mapping, \
@@ -505,7 +504,7 @@ class TestPlaceholderCollision:
         text = "A=192.168.1.1 B=192.168.1.2 C=192.168.1.3"
         r1 = engine.redact(text)
         r2 = engine.redact(r1)
-        assert r1 == r2, f"Double-pass changed output"
+        assert r1 == r2, "Double-pass changed output"
 
     def test_many_ips_no_cascade(self):
         """Redacting many IPs should not cause placeholders to collide with each other."""
@@ -886,7 +885,7 @@ class TestCrossCallConsistency:
     def test_cross_file_with_export_import(self):
         """Simulate sanitizing multiple engagement files."""
         engine1 = _engine()
-        r1 = engine1.redact(
+        engine1.redact(
             "Scan 10.10.14.5 found admin@corp.com open port 22"
         )
 
@@ -899,7 +898,7 @@ class TestCrossCallConsistency:
 
             engine2 = _engine()
             engine2.import_map(path)
-            r2 = engine2.redact(
+            engine2.redact(
                 "SSH to 10.10.14.5 as admin@corp.com"
             )
 
