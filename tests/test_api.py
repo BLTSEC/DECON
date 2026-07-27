@@ -10,7 +10,7 @@ import pytest
 
 import decon
 import decon.ask as ask_mod
-from decon import build_engine, desanitize, ask_safely, sanitize
+from decon import ask_safely, build_engine, desanitize, sanitize
 from decon.config import ConfigError, load_targets
 
 TARGETS = """\
@@ -93,6 +93,24 @@ class TestDesanitize:
         mapping = {"[H_1]": "short", "[H_10]": "long"}
         assert desanitize("[H_10]", mapping) == "long"
 
+    @pytest.mark.parametrize(
+        "mapping",
+        [
+            {"": "real"},
+            {"[X_1]": ""},
+            {1: "real"},
+            {"[X_1]": 1},
+            [],
+        ],
+    )
+    def test_invalid_mapping_is_rejected(self, mapping):
+        with pytest.raises(ValueError, match="mapping must contain"):
+            desanitize("text", mapping)
+
+    def test_non_string_text_is_rejected(self):
+        with pytest.raises(TypeError, match="text must be a string"):
+            desanitize(None, {})
+
 
 class TestKnownTargets:
     def test_each_category_is_applied(self, targets_file):
@@ -101,9 +119,9 @@ class TestKnownTargets:
         for value in ("ACME", "DC01", "SYSVOL", "jsmith", "acme.com"):
             assert value not in clean
 
-    def test_missing_file_is_not_an_error(self, tmp_path):
-        clean, _ = sanitize("text", tmp_path / "absent.txt", use_config=False)
-        assert clean == "text"
+    def test_missing_file_is_rejected(self, tmp_path):
+        with pytest.raises(ConfigError, match="does not exist"):
+            sanitize("text", tmp_path / "absent.txt", use_config=False)
 
     def test_comments_and_blank_lines_ignored(self, tmp_path):
         path = tmp_path / "t.txt"
@@ -187,6 +205,31 @@ class TestQueryCloudSafe:
         monkeypatch.setitem(ask_mod._PROVIDERS, "claude", lambda *a, **k: "ok")
         ask_safely(self.SOURCE, use_config=False, audit=True)
         assert "ask_safely" in audit_path().read_text()
+
+    def test_audit_config_can_disable_library_logging(
+        self, tmp_path, monkeypatch
+    ):
+        from decon.audit import audit_path
+
+        config = tmp_path / "decon.toml"
+        config.write_text("[audit]\nenabled = false\n")
+        monkeypatch.setattr("decon.config.DEFAULT_CONFIG_PATH", config)
+        monkeypatch.setitem(ask_mod._PROVIDERS, "claude", lambda *a, **k: "ok")
+
+        ask_safely(self.SOURCE)
+
+        assert not audit_path().exists()
+
+    def test_audit_config_path_is_used_by_library(self, tmp_path, monkeypatch):
+        configured_log = tmp_path / "configured.audit.jsonl"
+        config = tmp_path / "decon.toml"
+        config.write_text(f'[audit]\npath = "{configured_log}"\n')
+        monkeypatch.setattr("decon.config.DEFAULT_CONFIG_PATH", config)
+        monkeypatch.setitem(ask_mod._PROVIDERS, "claude", lambda *a, **k: "ok")
+
+        ask_safely(self.SOURCE)
+
+        assert configured_log.exists()
 
 
 class TestBuildEngine:

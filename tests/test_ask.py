@@ -7,7 +7,6 @@ a missing SDK produces a clear error rather than a traceback.
 
 from __future__ import annotations
 
-import sys
 from io import StringIO
 from types import SimpleNamespace
 
@@ -42,9 +41,34 @@ class TestAskFunction:
         with pytest.raises(AskError, match="unknown provider"):
             ask("q", "doc", provider="bogus")
 
+    def test_non_string_provider_is_rejected(self):
+        with pytest.raises(AskError, match="unknown provider"):
+            ask("q", "doc", provider=[])
+
     def test_empty_question_is_rejected(self):
         with pytest.raises(AskError, match="must not be empty"):
             ask("   ", "doc", provider="claude")
+
+    @pytest.mark.parametrize(
+        ("argument", "value", "message"),
+        [
+            ("question", None, "question must be a string"),
+            ("document", None, "document must be a string"),
+            ("model", "", "model must be a non-empty string"),
+            ("host", "", "host must be a non-empty string"),
+        ],
+    )
+    def test_invalid_string_arguments_are_rejected(
+        self, argument, value, message
+    ):
+        kwargs = {"question": "q", "document": "doc", argument: value}
+        with pytest.raises(AskError, match=message):
+            ask(**kwargs)
+
+    @pytest.mark.parametrize("value", [0, -1, True, 1.5])
+    def test_invalid_max_tokens_is_rejected(self, value):
+        with pytest.raises(AskError, match="positive integer"):
+            ask("q", "doc", provider="claude", max_tokens=value)
 
     def test_default_model_is_used(self, stub_provider):
         sent = stub_provider()
@@ -129,6 +153,26 @@ class TestClaudeProvider:
             ask_mod._ask_claude("p", "claude-opus-5", 100)
 
 
+class TestOpenAIProvider:
+    def test_disables_response_storage(self, monkeypatch):
+        sent = {}
+        response = SimpleNamespace(output_text="an answer")
+        client = SimpleNamespace(
+            responses=SimpleNamespace(
+                create=lambda **kwargs: sent.update(kwargs) or response
+            )
+        )
+        module = SimpleNamespace(
+            OpenAI=lambda: client,
+            APIStatusError=type("APIStatusError", (Exception,), {}),
+            APIConnectionError=type("APIConnectionError", (Exception,), {}),
+        )
+        monkeypatch.setattr(ask_mod, "_require", lambda *a, **k: module)
+
+        assert ask_mod._ask_openai("p", "gpt-5", 100) == "an answer"
+        assert sent["store"] is False
+
+
 class TestAskCli:
     SOURCE = (
         "Host dc01.corp.local at 10.4.12.50 with CORP\\jsmith "
@@ -146,6 +190,63 @@ class TestAskCli:
         capsys.readouterr()
         for secret in self.SECRETS:
             assert secret not in sent["prompt"]
+
+    def test_real_values_in_question_are_redacted_and_restored(
+        self, stub_provider, monkeypatch, capsys
+    ):
+        sent = stub_provider("Investigate [IPV4_REDACTED_0002].")
+        monkeypatch.setattr("sys.stdin", StringIO(self.SOURCE))
+
+        assert main(["--ask", "What about 10.99.0.7?"]) == 0
+        captured = capsys.readouterr()
+
+        assert "10.99.0.7" not in sent["prompt"]
+        assert "[IPV4_REDACTED_0002]" in sent["prompt"]
+        assert "10.99.0.7" in captured.out
+
+    def test_llm_findings_are_auto_redacted_before_ask(
+        self, stub_provider, monkeypatch, capsys
+    ):
+        sent = stub_provider("ok")
+        monkeypatch.setattr(
+            "sys.stdin",
+            StringIO("Project Nighthawk is the target\n"),
+        )
+        monkeypatch.setattr(
+            "decon.cli.llm_review",
+            lambda text, model, host, quiet: (
+                "FOUND: Project Nighthawk"
+                if "Project Nighthawk" in text
+                else "CLEAN"
+            ),
+        )
+
+        assert main(["--ask", "Summarize", "--llm"]) == 0
+        captured = capsys.readouterr()
+
+        assert "Project Nighthawk" not in sent["prompt"]
+        assert "[CUSTOM_REDACTED_" in sent["prompt"]
+        assert "auto-redacted" in captured.err
+
+    def test_question_review_findings_are_reapplied_to_document(
+        self, stub_provider, monkeypatch, capsys
+    ):
+        sent = stub_provider("ok")
+        monkeypatch.setattr(
+            "sys.stdin",
+            StringIO("Project Nighthawk is the target\n"),
+        )
+        reviews = iter(["CLEAN", "FOUND: Project Nighthawk"])
+        monkeypatch.setattr(
+            "decon.cli.llm_review",
+            lambda text, model, host, quiet: next(reviews),
+        )
+
+        assert main(["--ask", "Summarize", "--llm"]) == 0
+        capsys.readouterr()
+
+        assert "Project Nighthawk" not in sent["prompt"]
+        assert "[CUSTOM_REDACTED_" in sent["prompt"]
 
     def test_answer_is_restored_to_real_values(
         self, stub_provider, monkeypatch, capsys
@@ -170,6 +271,11 @@ class TestAskCli:
     def test_empty_prompt_is_rejected(self, capsys):
         assert main(["--ask", "  "]) == 1
         assert "non-empty prompt" in capsys.readouterr().err
+
+    @pytest.mark.parametrize("flag", [["--provider", "ollama"], ["--model", "x"]])
+    def test_provider_options_require_ask(self, flag, capsys):
+        assert main(flag) == 1
+        assert "require --ask" in capsys.readouterr().err
 
     @pytest.mark.parametrize(
         "flag", ["--dry-run", "--check", "--diff"]

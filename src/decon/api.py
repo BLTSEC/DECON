@@ -29,6 +29,7 @@ from decon.audit import write_entry
 from decon.config import (
     apply_config_to_engine,
     apply_targets,
+    get_audit_config,
     load_config,
 )
 from decon.engine import RedactionEngine
@@ -39,6 +40,27 @@ __all__ = [
     "desanitize",
     "ask_safely",
 ]
+
+
+def _build_engine_with_config(
+    targets_path: Path | str | None = None,
+    *,
+    profile: str | None = None,
+    use_config: bool = True,
+) -> tuple[RedactionEngine, dict]:
+    """Build an engine and return the configuration that was applied."""
+    engine = RedactionEngine()
+    config: dict = {}
+    if use_config:
+        config = load_config()
+        apply_config_to_engine(
+            engine,
+            config,
+            profile or os.environ.get("DECON_PROFILE"),
+        )
+    if targets_path is not None:
+        apply_targets(engine, targets_path)
+    return engine, config
 
 
 def build_engine(
@@ -52,16 +74,11 @@ def build_engine(
     Set `use_config=False` for a deterministic engine that ignores the
     developer's own ~/.config/decon/decon.toml — useful in tests.
     """
-    engine = RedactionEngine()
-    if use_config:
-        config = load_config()
-        apply_config_to_engine(
-            engine,
-            config,
-            profile or os.environ.get("DECON_PROFILE"),
-        )
-    if targets_path is not None:
-        apply_targets(engine, targets_path)
+    engine, _config = _build_engine_with_config(
+        targets_path,
+        profile=profile,
+        use_config=use_config,
+    )
     return engine
 
 
@@ -83,6 +100,18 @@ def sanitize(
 
 def desanitize(text: str, mapping: dict[str, str]) -> str:
     """Restore original values in text using a placeholder -> original map."""
+    if not isinstance(text, str):
+        raise TypeError("text must be a string")
+    if not isinstance(mapping, dict) or not all(
+        isinstance(placeholder, str)
+        and bool(placeholder)
+        and isinstance(original, str)
+        and bool(original)
+        for placeholder, original in mapping.items()
+    ):
+        raise ValueError(
+            "mapping must contain non-empty string placeholders and original values"
+        )
     # Longest first, so a placeholder that is a prefix of another cannot be
     # partially replaced.
     for placeholder in sorted(mapping, key=len, reverse=True):
@@ -105,10 +134,12 @@ def ask_safely(
     """Sanitize a prompt, send it to a provider, and restore the response.
 
     Returns the restored response and the placeholder -> original map used.
-    Only redacted text leaves this process; the provider never sees a real
-    value. Raises AskError if the provider is unavailable or declines.
+    Only the engine's sanitized output leaves this process; the original prompt
+    is never sent directly. As with every regex-based sanitizer, callers must
+    still account for identifiers no configured rule recognizes. Raises
+    AskError if the provider is unavailable or declines.
     """
-    engine = build_engine(
+    engine, config = _build_engine_with_config(
         targets_path,
         profile=profile,
         use_config=use_config,
@@ -116,11 +147,13 @@ def ask_safely(
     report = engine.redact_with_report(prompt)
     mapping = engine.reverse_map()
 
-    if audit:
+    audit_config = get_audit_config(config)
+    if audit and audit_config.get("enabled", True):
         write_entry(
             report.unique_applied(),
             mode="ask_safely",
             sources=[f"<{provider}>"],
+            path=audit_config.get("path"),
             quiet=True,
         )
 

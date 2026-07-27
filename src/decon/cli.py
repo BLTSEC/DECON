@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Callable
 
 from decon import __version__
-from decon.engine import RedactionEngine
 from decon.ask import (
     DEFAULT_MAX_TOKENS,
     DEFAULT_PROVIDER,
@@ -20,6 +19,7 @@ from decon.ask import (
     size_warning,
 )
 from decon.audit import write_entry
+from decon.cli_validation import validate_args
 from decon.config import (
     ConfigError,
     apply_config_to_engine,
@@ -28,6 +28,8 @@ from decon.config import (
     init_config,
     load_config,
 )
+from decon.engine import RedactionEngine
+from decon.llm import llm_review, parse_findings
 from decon.output import (
     capture_tmux_pane,
     read_clipboard,
@@ -35,7 +37,6 @@ from decon.output import (
     write_file,
     write_stdout,
 )
-from decon.llm import llm_review, parse_findings
 from decon.state import (
     DEFAULT_SESSION,
     StateError,
@@ -237,120 +238,36 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _validate_args(args: argparse.Namespace) -> str | None:
-    """Return an error message if args are invalid, or None if OK."""
-    # Mutual exclusion: output destinations
-    destinations = [
-        args.output is not None,
-        args.output_dir is not None,
-        args.clipboard,
-    ]
-    if sum(destinations) > 1:
-        return "--output, --output-dir, and --clipboard cannot be used together"
-
-    # Mutual exclusion: modes
-    modes = [args.dry_run, args.check, args.diff]
-    if args.unredact:
-        modes.append(True)
-    if args.restore is not None:
-        modes.append(True)
-    if sum(modes) > 1:
-        return (
-            "--dry-run, --check, --diff, --unredact, and --restore "
-            "are mutually exclusive"
-        )
-
-    # --session and --restore take an OPTIONAL name, so argparse will happily
-    # swallow a following filename as the name. Catch that rather than
-    # silently writing a session called "scan.txt".
-    for flag, value in (("--session", args.session), ("--restore", args.restore)):
-        if value is None or args.files:
-            continue
-        if os.path.exists(value):
-            return (
-                f"{flag} consumed {value!r} as a session name. "
-                f"Put the flag after the file ({flag} -c {value}), "
-                f"or name the session explicitly ({flag}=NAME {value})"
-            )
-
-    if args.session is not None and args.restore is not None:
-        return "--session and --restore cannot be used together"
-
-    # Validate names up front so a typo fails before any work is done.
-    for value in (args.session, args.restore):
-        if value is None:
-            continue
-        try:
-            session_path(value)
-        except StateError as e:
-            return str(e)
-
-    if args.ask is not None:
-        if not args.ask.strip():
-            return "--ask requires a non-empty prompt"
-        conflicting = [
-            name
-            for name, value in (
-                ("--dry-run", args.dry_run),
-                ("--check", args.check),
-                ("--diff", args.diff),
-                ("--unredact", args.unredact),
-                ("--restore", args.restore is not None),
-                ("--output-dir", args.output_dir),
-            )
-            if value
-        ]
-        if conflicting:
-            return f"--ask cannot be used with {', '.join(conflicting)}"
-
-    if args.output_dir and any(
-        (args.dry_run, args.check, args.diff, args.unredact)
-    ):
-        return (
-            "--output-dir cannot be used with --dry-run, --check, "
-            "--diff, or --unredact"
-        )
-
-    if args.output_dir and (args.tmux or args.clipboard_in):
-        return "--output-dir cannot be used with --tmux or --clipboard-in"
-
-    if (args.dry_run or args.check or args.diff) and (
-        args.output or args.clipboard
-    ):
-        return (
-            "--output and --clipboard cannot be used with --dry-run, "
-            "--check, or --diff"
-        )
-
-    # --output-dir requires files
-    if args.output_dir and not args.files:
-        return "--output-dir requires file arguments"
-
-    return None
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    err = validate_args(args)
+    if err:
+        print(f"Error: {err}", file=sys.stderr)
+        return 1
+
     if args.init_config:
         try:
-            init_config()
+            init_config(quiet=args.quiet)
             return 0
         except ConfigError as e:
             print(f"Error: {e}", file=sys.stderr)
             return 1
-
-    err = _validate_args(args)
-    if err:
-        print(f"Error: {err}", file=sys.stderr)
-        return 1
 
     # Session housekeeping needs no config, so a broken config file must not
     # stop you listing or deleting sessions.
     status = _run_session_admin(args)
     if status is not None:
         return status
+
+    # Restoring is an emergency/recovery path and needs no redaction rules.
+    # A broken unrelated profile or custom regex must not prevent access to a
+    # saved map. Load only a valid audit subsection, and fail closed on auditing
+    # if even the TOML or audit settings are unusable.
+    if args.restore is not None or args.unredact:
+        config = _load_reverse_config(args)
+        return _run_reverse(args, RedactionEngine(), config)
 
     try:
         config = load_config()
@@ -366,6 +283,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
+    if not _apply_cli_overrides(args, engine):
+        return 1
+
     if args.list_rules:
         for info in engine.list_rules():
             state = "enabled" if info["enabled"] else "disabled"
@@ -374,13 +294,6 @@ def main(argv: list[str] | None = None) -> int:
                 f"priority={info['priority']}  category={info['category']}"
             )
         return 0
-
-    if not _apply_cli_overrides(args, engine):
-        return 1
-
-    # Reverse modes turn placeholders back into real values.
-    if args.restore is not None or args.unredact:
-        return _run_reverse(args, engine, config)
 
     # Imported maps may contain entries for configured allowlisted values.
     # Reapply allowlists after import so explicit pass-through rules win.
@@ -449,6 +362,42 @@ def _run_session_admin(args: argparse.Namespace) -> int | None:
         return 0
 
     return None
+
+
+def _load_reverse_config(args: argparse.Namespace) -> dict:
+    """Load only safe audit settings for a restore/unredact operation.
+
+    Reverse operations do not need profiles, custom patterns, or enabled-rule
+    state. Ignoring those sections keeps recovery available when a redaction
+    setting is broken. If the TOML or audit subsection itself is invalid,
+    auditing is disabled rather than unexpectedly persisting restored values.
+    """
+    try:
+        config = load_config()
+    except ConfigError as e:
+        if not args.quiet:
+            print(
+                f"Warning: ignoring invalid config during restore ({e}); "
+                "audit logging is disabled for this run",
+                file=sys.stderr,
+            )
+        return {"audit": {"enabled": False}}
+
+    audit = config.get("audit", {})
+    valid = isinstance(audit, dict)
+    if valid and "enabled" in audit:
+        valid = isinstance(audit["enabled"], bool)
+    if valid and "path" in audit:
+        valid = isinstance(audit["path"], str) and bool(audit["path"].strip())
+    if not valid:
+        if not args.quiet:
+            print(
+                "Warning: invalid audit config during restore; "
+                "audit logging is disabled for this run",
+                file=sys.stderr,
+            )
+        return {"audit": {"enabled": False}}
+    return {"audit": audit}
 
 
 def _apply_cli_overrides(
@@ -554,7 +503,40 @@ def _run_redaction(
         result,
         interactive=not (args.check or args.dry_run),
         announce=not (args.check or args.dry_run),
+        auto_redact=args.ask is not None,
     )
+
+    redacted_question: str | None = None
+    question_applied: list[tuple[str, str, str]] = []
+    if args.ask is not None:
+        # The operator's question can contain the same infrastructure values as
+        # the document. Run it through the same stateful engine so both sides of
+        # the provider prompt share placeholders and reverse cleanly.
+        question_report = engine.redact_with_report(args.ask)
+        redacted_question = question_report.text
+        question_applied.extend(question_report.unique_applied())
+        redacted_question, question_findings, question_llm_applied = (
+            _review_with_llm(
+                args,
+                config,
+                engine,
+                redacted_question,
+                interactive=False,
+                announce=True,
+                auto_redact=True,
+            )
+        )
+        question_applied.extend(question_llm_applied)
+
+        # Question-only LLM findings register new custom rules. Reapply those
+        # rules to the document before it leaves the process too. Key this off
+        # the findings rather than replacements in the question: even a noisy
+        # reviewer finding that is absent from the question could be present in
+        # the document and must not knowingly pass to the provider.
+        if question_findings:
+            sync_report = engine.redact_with_report(result)
+            result = sync_report.text
+            question_applied.extend(sync_report.unique_applied())
 
     # Audit only the runs that actually emit redacted output. --check reports a
     # count, --dry-run previews to stderr, and --diff prints the original text
@@ -565,12 +547,13 @@ def _run_redaction(
         _record_audit(
             args,
             config,
-            applied + llm_applied,
+            _unique_applied(applied + llm_applied + question_applied),
             mode="ask" if args.ask is not None else "redact",
         )
 
     if args.ask is not None:
-        return _run_ask(args, engine, config, result)
+        assert redacted_question is not None
+        return _run_ask(args, engine, config, redacted_question, result)
     if args.check:
         return _run_check(args, applied, llm_findings, changed=changed)
     if args.dry_run:
@@ -590,10 +573,11 @@ def _run_ask(
     args: argparse.Namespace,
     engine: RedactionEngine,
     config: dict,
+    question: str,
     redacted: str,
 ) -> int:
     """Send redacted text to a provider and restore the reply."""
-    answer = _ask_provider(args, config, redacted)
+    answer = _ask_provider(args, config, question, redacted)
     if answer is None:
         return 1
 
@@ -700,12 +684,13 @@ def _warn_unresolved(
 def _ask_provider(
     args: argparse.Namespace,
     config: dict,
+    question: str,
     redacted: str,
 ) -> str | None:
     """Send redacted text to a provider. Returns None on failure.
 
-    Everything sent has already been through the engine — the provider never
-    sees an unredacted value.
+    Both the question and document have already been through the same engine;
+    neither original string is sent directly.
     """
     ask_cfg = config.get("ask", {})
     configured_provider = ask_cfg.get("provider", DEFAULT_PROVIDER)
@@ -722,7 +707,8 @@ def _ask_provider(
 
     if not args.quiet:
         warning = size_warning(
-            redacted, ask_cfg.get("warn_chars", DEFAULT_WARN_CHARS)
+            f"{question}\n{redacted}",
+            ask_cfg.get("warn_chars", DEFAULT_WARN_CHARS),
         )
         if warning:
             print(f"Warning: {warning}", file=sys.stderr)
@@ -732,7 +718,7 @@ def _ask_provider(
         )
     try:
         return ask(
-            args.ask,
+            question,
             redacted,
             provider=provider,
             model=model,
@@ -785,6 +771,7 @@ def _review_with_llm(
     *,
     interactive: bool,
     announce: bool,
+    auto_redact: bool = False,
 ) -> tuple[str, list[str], list[tuple[str, str, str]]]:
     """Run optional LLM review.
 
@@ -810,7 +797,21 @@ def _review_with_llm(
         return result, [], []
 
     accepted: list[tuple[str, str, str]] = []
-    if interactive and not args.quiet and sys.stderr.isatty():
+    if auto_redact:
+        # A cloud-bound --ask operation must never knowingly transmit a value
+        # the local reviewer just identified. Other modes retain the existing
+        # operator-review behavior.
+        engine.add_custom_values(findings, case_sensitive=False)
+        report = engine.redact_with_report(result)
+        result = report.text
+        accepted = report.unique_applied()
+        if announce and not args.quiet:
+            print(
+                f"LLM review auto-redacted {len(findings)} potential leak(s) "
+                "before provider transmission",
+                file=sys.stderr,
+            )
+    elif interactive and not args.quiet and sys.stderr.isatty():
         selected = _prompt_llm_review(findings)
         if selected:
             engine.add_custom_values(selected, case_sensitive=False)
@@ -1007,6 +1008,13 @@ def _stats_for_applied(
     for category, _real, _placeholder in applied:
         stats[category] = stats.get(category, 0) + 1
     return stats
+
+
+def _unique_applied(
+    applied: list[tuple[str, str, str]],
+) -> list[tuple[str, str, str]]:
+    """Deduplicate substitutions while preserving their first-seen order."""
+    return list(dict.fromkeys(applied))
 
 
 def _read_input(args: argparse.Namespace) -> str | None:

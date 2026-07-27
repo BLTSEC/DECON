@@ -7,7 +7,6 @@ import re
 from dataclasses import dataclass
 from typing import Callable
 
-
 # Type alias for custom apply functions.
 # Signature: (rule, text, mapping, counters, applied) -> str
 ApplyFn = Callable[

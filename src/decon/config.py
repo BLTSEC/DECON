@@ -312,13 +312,18 @@ def apply_config_to_engine(engine, config: dict, profile: str | None = None) -> 
             raise ConfigError(f"Unknown provider in ask.models: {name}")
         if not isinstance(value, str) or not value.strip():
             raise ConfigError(f"ask.models.{name} must be a non-empty string")
-    for key in ("max_tokens", "warn_chars"):
-        if key in ask and (
-            not isinstance(ask[key], int)
-            or isinstance(ask[key], bool)
-            or ask[key] < 0
-        ):
-            raise ConfigError(f"ask.{key} must be a non-negative integer")
+    if "max_tokens" in ask and (
+        not isinstance(ask["max_tokens"], int)
+        or isinstance(ask["max_tokens"], bool)
+        or ask["max_tokens"] <= 0
+    ):
+        raise ConfigError("ask.max_tokens must be a positive integer")
+    if "warn_chars" in ask and (
+        not isinstance(ask["warn_chars"], int)
+        or isinstance(ask["warn_chars"], bool)
+        or ask["warn_chars"] < 0
+    ):
+        raise ConfigError("ask.warn_chars must be a non-negative integer")
 
     audit = _require_table(config, "audit")
     if "enabled" in audit and not isinstance(audit["enabled"], bool):
@@ -329,14 +334,15 @@ def apply_config_to_engine(engine, config: dict, profile: str | None = None) -> 
         raise ConfigError("audit.path must be a non-empty string")
 
 
-def init_config() -> Path:
+def init_config(*, quiet: bool = False) -> Path:
     """Create default config file. Returns path."""
     path = DEFAULT_CONFIG_PATH
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
-        print(f"Config already exists: {path}", file=sys.stderr)
+        if not quiet:
+            print(f"Config already exists: {path}", file=sys.stderr)
         return path
     except OSError as e:
         raise ConfigError(f"Could not create config {path}: {e}") from e
@@ -354,7 +360,8 @@ def init_config() -> Path:
         except OSError:
             pass
         raise
-    print(f"Created config: {path}", file=sys.stderr)
+    if not quiet:
+        print(f"Created config: {path}", file=sys.stderr)
     return path
 
 
@@ -371,17 +378,17 @@ _TARGET_CATEGORIES = ("domain", "netbios", "username", "hostname", "share")
 def load_targets(path: Path | str) -> dict[str, list[str]]:
     """Parse a plain-text targets file into per-category value lists.
 
-    Returns empty lists when the file does not exist, so a caller can point at
-    an optional per-engagement file unconditionally.
+    An explicitly supplied path must exist. Silently treating a typo as an
+    empty targets file would leave engagement identifiers unredacted.
     """
     target_path = Path(path).expanduser()
     targets: dict[str, list[str]] = {c: [] for c in _TARGET_CATEGORIES}
     if not target_path.exists():
-        return targets
+        raise ConfigError(f"Targets file does not exist: {target_path}")
 
     try:
         lines = target_path.read_text(encoding="utf-8").splitlines()
-    except OSError as e:
+    except (OSError, UnicodeError) as e:
         raise ConfigError(f"Could not read targets file {target_path}: {e}") from e
 
     for number, raw in enumerate(lines, start=1):

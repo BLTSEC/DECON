@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 import re
 import sys
-import urllib.request
 import urllib.error
+import urllib.request
 
 from decon.patterns import get_placeholder_templates
 
@@ -263,7 +263,7 @@ def _filter_placeholder_findings(response: str) -> str:
         seen_findings.add(normalized.lower())
         lines.append(f"FOUND: {value}")
     filtered = "\n".join(lines).strip()
-    if not any(l.startswith("FOUND:") for l in lines):
+    if not any(line.startswith("FOUND:") for line in lines):
         return "CLEAN"
     return filtered
 

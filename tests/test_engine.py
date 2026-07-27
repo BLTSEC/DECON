@@ -1,8 +1,7 @@
 """Tests for RedactionEngine."""
 
-import json
-import tempfile
 import os
+import tempfile
 
 import pytest
 
