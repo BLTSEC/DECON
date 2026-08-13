@@ -548,7 +548,7 @@ a hook definition, so guarding a notes vault is a few lines:
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/BLTSEC/DECON
-    rev: v0.4.0
+    rev: v0.5.0
     hooks:
       - id: decon
 ```
