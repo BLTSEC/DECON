@@ -230,6 +230,39 @@ class TestAskCli:
         assert "[CUSTOM_REDACTED_" in sent["prompt"]
         assert "auto-redacted" in captured.err
 
+    def test_strict_llm_auto_redacts_before_ask(
+        self, stub_provider, monkeypatch, capsys
+    ):
+        sent = stub_provider("ok")
+        monkeypatch.setattr("sys.stdin", StringIO("Project Nighthawk is the target\n"))
+        monkeypatch.setattr(
+            "decon.cli.llm_review",
+            lambda text, model, host, quiet: (
+                "FOUND: Project Nighthawk" if "Project Nighthawk" in text else "CLEAN"
+            ),
+        )
+
+        assert main(["--ask", "Summarize", "--strict-llm"]) == 0
+
+        capsys.readouterr()
+        assert "Project Nighthawk" not in sent["prompt"]
+        assert "[CUSTOM_REDACTED_" in sent["prompt"]
+
+    def test_strict_llm_failure_never_calls_provider(
+        self, stub_provider, monkeypatch, capsys
+    ):
+        sent = stub_provider("should not be returned")
+        monkeypatch.setattr("sys.stdin", StringIO(self.SOURCE))
+        monkeypatch.setattr(
+            "decon.cli.llm_review",
+            lambda text, model, host, quiet: None,
+        )
+
+        assert main(["--ask", "What next?", "--strict-llm"]) == 1
+
+        assert "prompt" not in sent
+        assert capsys.readouterr().out == ""
+
     def test_question_review_findings_are_reapplied_to_document(
         self, stub_provider, monkeypatch, capsys
     ):

@@ -46,6 +46,10 @@ from decon.state import (
 )
 
 
+class RequiredLLMReviewError(RuntimeError):
+    """Raised when required local review does not allow output emission."""
+
+
 def _split_csv(value: str) -> list[str]:
     """Split a comma-separated CLI value list, dropping empty entries."""
     return [item.strip() for item in value.split(",") if item.strip()]
@@ -138,6 +142,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--llm",
         action="store_true",
         help="Local LLM safety check via Ollama",
+    )
+    parser.add_argument(
+        "--strict-llm",
+        action="store_true",
+        help="Require a successful clean LLM review before emitting output",
     )
     parser.add_argument(
         "--ask",
@@ -312,14 +321,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.allow:
         engine.add_allowlist(_split_csv(args.allow))
 
-    if args.output_dir:
-        return _batch_process(args, engine, config)
+    try:
+        if args.output_dir:
+            return _batch_process(args, engine, config)
 
-    text = _read_input(args)
-    if text is None:
+        text = _read_input(args)
+        if text is None:
+            return 1
+
+        return _run_redaction(args, engine, config, text)
+    except RequiredLLMReviewError as e:
+        print(f"Error: strict LLM review blocked output ({e})", file=sys.stderr)
         return 1
-
-    return _run_redaction(args, engine, config, text)
 
 
 def _run_session_admin(args: argparse.Namespace) -> int | None:
@@ -781,8 +794,17 @@ def _llm_enabled(args: argparse.Namespace, config: dict) -> bool:
     """Return whether LLM review is enabled for this invocation."""
     llm_cfg = get_llm_config(config)
     return bool(
-        args.llm or os.environ.get("DECON_LLM") == "1" or llm_cfg.get("enabled", False)
+        args.llm
+        or _llm_required(args, config)
+        or os.environ.get("DECON_LLM") == "1"
+        or llm_cfg.get("enabled", False)
     )
+
+
+def _llm_required(args: argparse.Namespace, config: dict) -> bool:
+    """Return whether local review must succeed before output is emitted."""
+    llm_cfg = get_llm_config(config)
+    return bool(args.strict_llm or llm_cfg.get("required", False))
 
 
 def _review_with_llm(
@@ -805,17 +827,24 @@ def _review_with_llm(
         return result, [], []
 
     llm_cfg = get_llm_config(config)
+    required = _llm_required(args, config)
     review = llm_review(
         result,
         model=llm_cfg.get("model", "qwen3.5:9b"),
         host=llm_cfg.get("host", "http://localhost:11434"),
         quiet=args.quiet,
     )
-    if not review or review.strip() == "CLEAN":
+    if not review:
+        if required:
+            raise RequiredLLMReviewError("Ollama review was unavailable or invalid")
+        return result, [], []
+    if review.strip() == "CLEAN":
         return result, [], []
 
     findings = parse_findings(review)
     if not findings:
+        if required:
+            raise RequiredLLMReviewError("Ollama returned an invalid review response")
         return result, [], []
 
     accepted: list[tuple[str, str, str]] = []
@@ -845,6 +874,22 @@ def _review_with_llm(
         print("LLM review flagged potential issues:", file=sys.stderr)
         print(review, file=sys.stderr)
         print("---", file=sys.stderr)
+
+    if required:
+        accepted_values = {
+            original.casefold() for _category, original, _placeholder in accepted
+        }
+        remaining = [
+            finding for finding in findings if finding.casefold() not in accepted_values
+        ]
+        if remaining:
+            if not args.quiet:
+                print("Strict LLM review found unresolved values:", file=sys.stderr)
+                for finding in remaining:
+                    print(f"  {finding}", file=sys.stderr)
+            raise RequiredLLMReviewError(
+                f"{len(remaining)} reviewer finding(s) remain unredacted"
+            )
     return result, findings, accepted
 
 
@@ -953,14 +998,8 @@ def _batch_process(
     config: dict,
 ) -> int:
     """Process multiple files, writing each to output-dir."""
-    try:
-        os.makedirs(args.output_dir, exist_ok=True)
-    except OSError as e:
-        print(
-            f"Error creating output directory {args.output_dir}: {e}", file=sys.stderr
-        )
-        return 1
     output_paths = _build_batch_output_paths(args.files, args.output_dir)
+    processed: list[tuple[str, str, list[tuple[str, str, str]]]] = []
 
     for path in args.files:
         try:
@@ -980,6 +1019,19 @@ def _batch_process(
             interactive=False,
             announce=True,
         )
+        processed.append((path, result, report.unique_applied() + llm_applied))
+
+    # Review every file before creating or writing the output tree. In strict
+    # mode, one failed review therefore cannot leave a partially emitted batch.
+    try:
+        os.makedirs(args.output_dir, exist_ok=True)
+    except OSError as e:
+        print(
+            f"Error creating output directory {args.output_dir}: {e}", file=sys.stderr
+        )
+        return 1
+
+    for path, result, applied in processed:
         out_path = output_paths[path]
         try:
             out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -990,7 +1042,7 @@ def _batch_process(
         _record_audit(
             args,
             config,
-            report.unique_applied() + llm_applied,
+            applied,
             mode="redact",
             sources=[path],
         )

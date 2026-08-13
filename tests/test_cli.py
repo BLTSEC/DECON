@@ -364,6 +364,101 @@ class TestLLMInteractiveFlow:
         assert "FOUND: jimmy.johns" in captured.err
         assert "jimmy.johns" in captured.out
 
+    def test_strict_clean_review_emits_output(self, monkeypatch, capsys):
+        calls = []
+        monkeypatch.setattr("sys.stdin", StringIO("ordinary text\n"))
+        monkeypatch.setattr(
+            "decon.cli.llm_review",
+            lambda text, model, host, quiet: calls.append(text) or "CLEAN",
+        )
+
+        assert main(["--strict-llm"]) == 0
+
+        captured = capsys.readouterr()
+        assert captured.out == "ordinary text\n"
+        assert calls == ["ordinary text\n"]
+
+    def test_strict_unavailable_review_blocks_output(self, monkeypatch, capsys):
+        monkeypatch.setattr("sys.stdin", StringIO("ordinary text\n"))
+        monkeypatch.setattr(
+            "decon.cli.llm_review",
+            lambda text, model, host, quiet: None,
+        )
+
+        assert main(["--strict-llm"]) == 1
+
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "strict LLM review blocked output" in captured.err
+
+    def test_normal_llm_remains_fail_open_when_unavailable(self, monkeypatch, capsys):
+        monkeypatch.setattr("sys.stdin", StringIO("ordinary text\n"))
+        monkeypatch.setattr(
+            "decon.cli.llm_review",
+            lambda text, model, host, quiet: None,
+        )
+
+        assert main(["--llm"]) == 0
+        assert capsys.readouterr().out == "ordinary text\n"
+
+    def test_strict_noninteractive_findings_block_output(self, monkeypatch, capsys):
+        monkeypatch.setattr("sys.stdin", StringIO("Project Nighthawk\n"))
+        monkeypatch.setattr(
+            "decon.cli.llm_review",
+            lambda text, model, host, quiet: "FOUND: Project Nighthawk",
+        )
+
+        assert main(["--strict-llm"]) == 1
+
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "1 reviewer finding(s) remain unredacted" in captured.err
+
+    def test_required_config_implies_llm_and_blocks_output(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        config = tmp_path / "decon.toml"
+        config.write_text("[llm]\nrequired = true\n")
+        monkeypatch.setattr("decon.config.DEFAULT_CONFIG_PATH", config)
+        monkeypatch.setattr("sys.stdin", StringIO("ordinary text\n"))
+        monkeypatch.setattr(
+            "decon.cli.llm_review",
+            lambda text, model, host, quiet: None,
+        )
+
+        assert main([]) == 1
+        assert capsys.readouterr().out == ""
+
+    def test_strict_batch_reviews_all_files_before_writing(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        first = tmp_path / "first.txt"
+        second = tmp_path / "second.txt"
+        output = tmp_path / "redacted"
+        first.write_text("first ordinary value\n")
+        second.write_text("second leaked value\n")
+        reviews = iter(["CLEAN", "FOUND: second leaked value"])
+        monkeypatch.setattr(
+            "decon.cli.llm_review",
+            lambda text, model, host, quiet: next(reviews),
+        )
+
+        assert (
+            main(
+                [
+                    str(first),
+                    str(second),
+                    "--output-dir",
+                    str(output),
+                    "--strict-llm",
+                ]
+            )
+            == 1
+        )
+
+        capsys.readouterr()
+        assert not output.exists()
+
     def test_finding_containing_clean_is_not_discarded(self, monkeypatch, capsys):
         monkeypatch.setattr("sys.stdin", StringIO("Project CLEANROOM\n"))
         monkeypatch.setattr(

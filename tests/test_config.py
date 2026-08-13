@@ -151,6 +151,7 @@ class TestApplyConfig:
             ({"custom": {"netbios": [1]}}, "non-empty strings"),
             ({"custom": {"shares": [None]}}, "non-empty strings"),
             ({"llm": {"enabled": "yes"}}, "llm.enabled"),
+            ({"llm": {"required": "yes"}}, "llm.required"),
             ({"llm": {"host": ""}}, "llm.host"),
             ({"audit": {"enabled": "yes"}}, "audit.enabled"),
             ({"audit": {"path": ""}}, "audit.path"),

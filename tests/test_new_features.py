@@ -848,6 +848,28 @@ class TestLLMChunking:
         assert "LLM chunks" in captured.err
         assert "truncat" not in captured.err.lower()
 
+    def test_invalid_review_protocol_is_not_treated_as_clean(self, monkeypatch, capsys):
+        from decon.llm import llm_review
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps(
+                    {"message": {"content": "Looks safe to me."}}
+                ).encode()
+
+        monkeypatch.setattr(
+            "urllib.request.urlopen", lambda request, timeout: FakeResponse()
+        )
+
+        assert llm_review("ordinary text") is None
+        assert "outside the CLEAN/FOUND protocol" in capsys.readouterr().err
+
 
 class TestLLMPostFilterNormalization:
     """Test that the post-filter handles LLM-added context on placeholder values."""

@@ -21,6 +21,7 @@ default_profile = "standard"
 
 [llm]
 enabled = false
+required = false
 model = "qwen3.5:9b"
 host = "http://localhost:11434"
 
@@ -285,8 +286,9 @@ def apply_config_to_engine(engine, config: dict, profile: str | None = None) -> 
             engine.add_custom_values(extra, case_sensitive=True)
 
     llm = _require_table(config, "llm")
-    if "enabled" in llm and not isinstance(llm["enabled"], bool):
-        raise ConfigError("llm.enabled must be true or false")
+    for key in ("enabled", "required"):
+        if key in llm and not isinstance(llm[key], bool):
+            raise ConfigError(f"llm.{key} must be true or false")
     for key in ("model", "host"):
         if key in llm and (not isinstance(llm[key], str) or not llm[key].strip()):
             raise ConfigError(f"llm.{key} must be a non-empty string")

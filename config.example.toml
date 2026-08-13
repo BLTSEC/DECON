@@ -13,6 +13,7 @@ default_profile = "standard"
 
 [llm]
 enabled = false
+required = false                     # fail closed if review fails or leaks remain
 model = "qwen3.5:9b"
 host = "http://localhost:11434"
 

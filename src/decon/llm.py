@@ -439,6 +439,15 @@ def _ollama_request(text: str, model: str, host: str) -> str:
     return data.get("message", {}).get("content", "")
 
 
+def _valid_review_response(response: str) -> bool:
+    """Return whether a reviewer response follows the CLEAN/FOUND protocol."""
+    stripped = response.strip()
+    if stripped.upper() == "CLEAN":
+        return True
+    lines = [line for line in stripped.splitlines() if line.strip()]
+    return bool(lines) and all(_FINDING_LINE_RE.match(line) for line in lines)
+
+
 def llm_review(
     text: str,
     model: str = "qwen3.5:9b",
@@ -461,18 +470,22 @@ def llm_review(
         raw_responses = [
             _ollama_request(chunk, model=model, host=host) for chunk in chunks
         ]
+        if not all(_valid_review_response(response) for response in raw_responses):
+            raise ValueError(
+                "Ollama returned a response outside the CLEAN/FOUND protocol"
+            )
         return _filter_placeholder_findings("\n".join(raw_responses))
     except urllib.error.URLError as e:
         if not quiet:
             print(
-                f"Warning: Ollama not available ({e}), proceeding with regex-only output",
+                f"Warning: Ollama not available ({e}); LLM review was skipped",
                 file=sys.stderr,
             )
         return None
     except Exception as e:
         if not quiet:
             print(
-                f"Warning: LLM review failed ({e}), proceeding with regex-only output",
+                f"Warning: LLM review failed ({e}); LLM review was skipped",
                 file=sys.stderr,
             )
         return None

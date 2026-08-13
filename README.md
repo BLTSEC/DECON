@@ -217,6 +217,7 @@ custom_values_extra = ["Internal Codename"]
 
 [llm]
 enabled = false
+required = false
 model = "qwen3.5:9b"
 host = "http://localhost:11434"
 ```
@@ -410,16 +411,34 @@ Large inputs are reviewed in overlapping, line-aware chunks rather than being
 truncated. If Ollama is unavailable, DECON warns and continues with the
 deterministic rules.
 
+Use `--strict-llm` when continuing without that safety check is unacceptable:
+
+```bash
+decon --strict-llm -o scan.redacted.txt scan.txt
+decon --strict-llm --ask "What should I investigate next?" scan.txt
+```
+
+Strict mode implies `--llm` and emits nothing unless Ollama returns a valid
+`CLEAN`/`FOUND:` response and every finding is redacted. Interactive runs may
+accept all findings; `--ask` redacts them automatically before provider
+transmission. Non-interactive output is blocked when findings remain. Batch
+mode reviews every file before creating the output tree, so one failed review
+cannot leave a partially emitted batch. Enable the same policy by default with
+`required = true` under `[llm]`.
+
 > [!WARNING]
 > The review text may still contain the exact sensitive values the regex rules
 > missed. The default endpoint is local. Point `llm.host` only at a system you
-> trust, and secure Ollama before exposing it to a container or network.
+> trust, and secure Ollama before exposing it to a container or network. Strict
+> mode prevents fail-open output; it cannot prove that a probabilistic reviewer
+> noticed every leak or resisted instructions embedded in the reviewed text.
 
 For a container, configure the host endpoint explicitly:
 
 ```toml
 [llm]
 enabled = true
+required = true
 host = "http://host.docker.internal:11434"
 ```
 
@@ -630,6 +649,7 @@ Run `decon --help` for the complete, current reference.
 | Rule control | `--enable RULES`, `--disable RULES`, `--list-rules` |
 | Profile | `--profile NAME` |
 | Local LLM review | `--llm` |
+| Required LLM review | `--strict-llm` |
 | Ask an LLM | `--ask PROMPT`, `--provider NAME`, `--model NAME` |
 | Audit | `--no-audit` |
 
