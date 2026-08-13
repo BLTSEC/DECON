@@ -4,7 +4,7 @@ from decon.api import ask_safely, build_engine, desanitize, sanitize
 from decon.ask import AskError
 from decon.engine import RedactionEngine
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 __all__ = [
     "AskError",
