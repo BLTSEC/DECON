@@ -28,10 +28,11 @@ def _build_placeholder_re() -> re.Pattern[str]:
         # Replace format specifiers with appropriate regex patterns
         # {n:02d}, {n:04d}, {n} -> \d+
         # {n:x}, {n:02X} -> [0-9a-fA-F]+
-        escaped = re.sub(r"\\{n(?::[^}]*)?\\}", lambda m: (
-            r"[0-9a-fA-F]+" if any(c in m.group() for c in "xX")
-            else r"\d+"
-        ), escaped)
+        escaped = re.sub(
+            r"\\{n(?::[^}]*)?\\}",
+            lambda m: r"[0-9a-fA-F]+" if any(c in m.group() for c in "xX") else r"\d+",
+            escaped,
+        )
         fragments.append(escaped)
 
     # Also match default and documented custom placeholder formats.
@@ -82,36 +83,124 @@ Reply CLEAN if nothing found. Otherwise one FOUND: per line. No explanation.
 # and small models can't reliably distinguish software names from real leaks.
 _SAFE_SOFTWARE = {
     # Web servers
-    "apache", "apache httpd", "nginx", "iis", "tomcat", "lighttpd", "httpd",
-    "caddy", "gunicorn", "uvicorn",
+    "apache",
+    "apache httpd",
+    "nginx",
+    "iis",
+    "tomcat",
+    "lighttpd",
+    "httpd",
+    "caddy",
+    "gunicorn",
+    "uvicorn",
     # SSH / remote access
-    "openssh", "dropbear", "putty",
+    "openssh",
+    "dropbear",
+    "putty",
     # Operating systems
-    "ubuntu", "debian", "centos", "fedora", "kali", "alpine", "rhel",
-    "red hat", "suse", "arch linux", "gentoo", "slackware",
-    "linux", "windows", "windows server", "macos", "freebsd", "openbsd",
-    "unix", "solaris",
+    "ubuntu",
+    "debian",
+    "centos",
+    "fedora",
+    "kali",
+    "alpine",
+    "rhel",
+    "red hat",
+    "suse",
+    "arch linux",
+    "gentoo",
+    "slackware",
+    "linux",
+    "windows",
+    "windows server",
+    "macos",
+    "freebsd",
+    "openbsd",
+    "unix",
+    "solaris",
     # Vendors / orgs in banners
-    "microsoft", "nlnet labs", "nsd", "isc", "isc bind", "bind",
-    "nmap", "nmap project",
+    "microsoft",
+    "nlnet labs",
+    "nsd",
+    "isc",
+    "isc bind",
+    "bind",
+    "nmap",
+    "nmap project",
     # Databases
-    "mysql", "postgresql", "mariadb", "mongodb", "redis", "mssql",
-    "sql server", "oracle", "sqlite", "cassandra", "elasticsearch",
+    "mysql",
+    "postgresql",
+    "mariadb",
+    "mongodb",
+    "redis",
+    "mssql",
+    "sql server",
+    "oracle",
+    "sqlite",
+    "cassandra",
+    "elasticsearch",
     # Languages / runtimes
-    "php", "python", "java", "node.js", "ruby", "perl", "go", ".net",
+    "php",
+    "python",
+    "java",
+    "node.js",
+    "ruby",
+    "perl",
+    "go",
+    ".net",
     # CI / infra tools
-    "jenkins", "grafana", "gitlab", "docker", "kubernetes", "ansible",
-    "terraform", "prometheus", "nagios", "zabbix",
+    "jenkins",
+    "grafana",
+    "gitlab",
+    "docker",
+    "kubernetes",
+    "ansible",
+    "terraform",
+    "prometheus",
+    "nagios",
+    "zabbix",
     # CMS / web apps
-    "wordpress", "drupal", "joomla",
+    "wordpress",
+    "drupal",
+    "joomla",
     # Protocols
-    "ssl", "tls", "http", "https", "ftp", "smtp", "dns", "ldap",
-    "kerberos", "smb", "rdp", "vnc", "snmp", "ntp",
+    "ssl",
+    "tls",
+    "http",
+    "https",
+    "ftp",
+    "smtp",
+    "dns",
+    "ldap",
+    "kerberos",
+    "smb",
+    "rdp",
+    "vnc",
+    "snmp",
+    "ntp",
     # Security tools (appear in output headers)
-    "gobuster", "metasploit", "burp", "nessus", "openvas", "nikto",
-    "sqlmap", "hydra", "john", "hashcat", "responder", "bloodhound",
-    "mimikatz", "crackmapexec", "netexec", "impacket", "certipy",
-    "smbclient", "rpcclient", "enum4linux", "linpeas", "winpeas",
+    "gobuster",
+    "metasploit",
+    "burp",
+    "nessus",
+    "openvas",
+    "nikto",
+    "sqlmap",
+    "hydra",
+    "john",
+    "hashcat",
+    "responder",
+    "bloodhound",
+    "mimikatz",
+    "crackmapexec",
+    "netexec",
+    "impacket",
+    "certipy",
+    "smbclient",
+    "rpcclient",
+    "enum4linux",
+    "linpeas",
+    "winpeas",
 }
 
 
@@ -122,9 +211,9 @@ _SAFE_SOFTWARE = {
 _TIMESTAMP_RE = re.compile(
     r"^(?:"
     r"\d{4}-\d{2}-\d{2}[\sT]\d{2}:\d{2}(?::\d{2})?"  # datetime
-    r"|\d{4}-\d{2}-\d{2}"                              # date only
-    r"|\d{2}:\d{2}:\d{2}"                              # time only
-    r"|\d{2}:\d{2}:\d{2}(?:\s+[A-Z]{2,5})?\s+\d{4}"   # time tz year
+    r"|\d{4}-\d{2}-\d{2}"  # date only
+    r"|\d{2}:\d{2}:\d{2}"  # time only
+    r"|\d{2}:\d{2}:\d{2}(?:\s+[A-Z]{2,5})?\s+\d{4}"  # time tz year
     r"|(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+"
     r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+"
     r"\d{1,2}\s+\d{2}:\d{2}:\d{2}(?:\s+[A-Z]{2,5})?\s+\d{4}"  # ctime/date
@@ -145,21 +234,37 @@ _DURATION_RE = re.compile(
 # These are tool inputs (what was used), not target data.
 _SAFE_WORDLISTS = {
     # SecLists / common password lists
-    "rockyou.txt", "rockyou.txt.gz",
-    "common.txt", "big.txt", "raft-large-words.txt", "raft-medium-words.txt",
-    "raft-small-words.txt", "raft-large-files.txt", "raft-medium-files.txt",
-    "directory-list-2.3-medium.txt", "directory-list-2.3-small.txt",
-    "directory-list-2.3-big.txt", "directory-list-lowercase-2.3-medium.txt",
-    "best1050.txt", "darkweb2017-top10000.txt",
+    "rockyou.txt",
+    "rockyou.txt.gz",
+    "common.txt",
+    "big.txt",
+    "raft-large-words.txt",
+    "raft-medium-words.txt",
+    "raft-small-words.txt",
+    "raft-large-files.txt",
+    "raft-medium-files.txt",
+    "directory-list-2.3-medium.txt",
+    "directory-list-2.3-small.txt",
+    "directory-list-2.3-big.txt",
+    "directory-list-lowercase-2.3-medium.txt",
+    "best1050.txt",
+    "darkweb2017-top10000.txt",
     "2023-200_most_used_passwords.txt",
-    "fasttrack.txt", "probable-v2-top1575.txt", "probable-v2-top12000.txt",
+    "fasttrack.txt",
+    "probable-v2-top1575.txt",
+    "probable-v2-top12000.txt",
     "xato-net-10-million-passwords.txt",
     # Username lists
-    "names.txt", "usernames.txt", "top-usernames-shortlist.txt",
+    "names.txt",
+    "usernames.txt",
+    "top-usernames-shortlist.txt",
     # DNS / subdomains
-    "subdomains-top1million-5000.txt", "subdomains-top1million-20000.txt",
-    "subdomains-top1million-110000.txt", "bitquark-subdomains-top100000.txt",
-    "fierce-hostlist.txt", "namelist.txt",
+    "subdomains-top1million-5000.txt",
+    "subdomains-top1million-20000.txt",
+    "subdomains-top1million-110000.txt",
+    "bitquark-subdomains-top100000.txt",
+    "fierce-hostlist.txt",
+    "namelist.txt",
 }
 
 # Intentionally preserved Nmap boilerplate URLs.
@@ -309,18 +414,20 @@ def _chunk_review_text(text: str) -> list[str]:
 def _ollama_request(text: str, model: str, host: str) -> str:
     """Send one review chunk to Ollama and return its raw response text."""
     url = f"{host.rstrip('/')}/api/chat"
-    payload = json.dumps({
-        "model": model,
-        "messages": [
-            {"role": "user", "content": REVIEW_PROMPT.format(text=text)},
-        ],
-        "stream": False,
-        "think": False,
-        "options": {
-            "num_predict": 256,
-            "temperature": 0,
-        },
-    }).encode()
+    payload = json.dumps(
+        {
+            "model": model,
+            "messages": [
+                {"role": "user", "content": REVIEW_PROMPT.format(text=text)},
+            ],
+            "stream": False,
+            "think": False,
+            "options": {
+                "num_predict": 256,
+                "temperature": 0,
+            },
+        }
+    ).encode()
 
     req = urllib.request.Request(
         url,

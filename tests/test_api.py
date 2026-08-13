@@ -94,6 +94,15 @@ class TestDesanitize:
         assert desanitize("[H_10]", mapping) == "long"
 
     @pytest.mark.parametrize(
+        "mutated",
+        ["[IPV4_REDACTED_0001]0", "[IPV4_REDACTED_0001].attacker.test"],
+    )
+    def test_mutated_placeholder_is_not_partially_restored(self, mutated):
+        mapping = {"[IPV4_REDACTED_0001]": "10.23.45.67"}
+
+        assert desanitize(mutated, mapping) == mutated
+
+    @pytest.mark.parametrize(
         "mapping",
         [
             {"": "real"},
@@ -170,9 +179,7 @@ class TestQueryCloudSafe:
             "claude",
             lambda *a, **k: "Start at [HOST_REDACTED_0001].",
         )
-        answer, mapping = ask_safely(
-            self.SOURCE, use_config=False, audit=False
-        )
+        answer, mapping = ask_safely(self.SOURCE, use_config=False, audit=False)
         assert "dc01.corp.local" in answer
         assert mapping
 
@@ -183,9 +190,7 @@ class TestQueryCloudSafe:
             "ollama",
             lambda *a, **k: seen.setdefault("called", True) and "ok",
         )
-        ask_safely(
-            self.SOURCE, provider="ollama", use_config=False, audit=False
-        )
+        ask_safely(self.SOURCE, provider="ollama", use_config=False, audit=False)
         assert seen["called"]
 
     def test_unknown_provider_raises(self):
@@ -206,9 +211,7 @@ class TestQueryCloudSafe:
         ask_safely(self.SOURCE, use_config=False, audit=True)
         assert "ask_safely" in audit_path().read_text()
 
-    def test_audit_config_can_disable_library_logging(
-        self, tmp_path, monkeypatch
-    ):
+    def test_audit_config_can_disable_library_logging(self, tmp_path, monkeypatch):
         from decon.audit import audit_path
 
         config = tmp_path / "decon.toml"

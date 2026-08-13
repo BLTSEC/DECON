@@ -4,8 +4,39 @@ from __future__ import annotations
 
 import argparse
 import os
+from pathlib import Path
 
 from decon.state import StateError, session_path
+
+
+def _same_path(first: str | Path, second: str | Path) -> bool:
+    """Return whether two path spellings identify the same destination."""
+    left = Path(first).expanduser().resolve(strict=False)
+    right = Path(second).expanduser().resolve(strict=False)
+    if left == right:
+        return True
+    try:
+        return left.exists() and right.exists() and os.path.samefile(left, right)
+    except OSError:
+        return False
+
+
+def validate_path_collisions(
+    sources: list[tuple[str, str | Path]],
+    destinations: list[tuple[str, str | Path]],
+) -> str | None:
+    """Reject outputs that alias an input or another output."""
+    for index, (label, path) in enumerate(destinations):
+        for other_label, other_path in destinations[index + 1 :]:
+            if _same_path(path, other_path):
+                return f"{label} and {other_label} resolve to the same path: {path}"
+        for source_label, source_path in sources:
+            if _same_path(path, source_path):
+                return (
+                    f"{label} would overwrite {source_label}: {path}; "
+                    "choose a different destination"
+                )
+    return None
 
 
 def _enabled_names(options: tuple[tuple[str, bool], ...]) -> list[str]:
@@ -39,6 +70,7 @@ def validate_args(args: argparse.Namespace) -> str | None:
                 ("--disable", args.disable is not None),
                 ("--allow", args.allow is not None),
                 ("--redact", args.redact is not None),
+                ("--targets", args.targets is not None),
                 ("--llm", args.llm),
                 ("--ask", args.ask is not None),
                 ("--provider", args.provider is not None),
@@ -73,6 +105,7 @@ def validate_args(args: argparse.Namespace) -> str | None:
                 ("--output-dir", args.output_dir is not None),
                 ("--allow", args.allow is not None),
                 ("--redact", args.redact is not None),
+                ("--targets", args.targets is not None),
                 ("--llm", args.llm),
                 ("--ask", args.ask is not None),
                 ("--provider", args.provider is not None),
@@ -178,12 +211,9 @@ def validate_args(args: argparse.Namespace) -> str | None:
     if args.output_dir and (args.tmux or args.clipboard_in):
         return "--output-dir cannot be used with --tmux or --clipboard-in"
 
-    if (args.dry_run or args.check or args.diff) and (
-        args.output or args.clipboard
-    ):
+    if (args.dry_run or args.check or args.diff) and (args.output or args.clipboard):
         return (
-            "--output and --clipboard cannot be used with --dry-run, "
-            "--check, or --diff"
+            "--output and --clipboard cannot be used with --dry-run, --check, or --diff"
         )
 
     if args.output_dir and not args.files:
@@ -197,6 +227,7 @@ def validate_args(args: argparse.Namespace) -> str | None:
                 ("--disable", args.disable is not None),
                 ("--allow", args.allow is not None),
                 ("--redact", args.redact is not None),
+                ("--targets", args.targets is not None),
                 ("--llm", args.llm),
                 ("--import-map", args.import_map is not None),
                 ("--export-map", args.export_map is not None),

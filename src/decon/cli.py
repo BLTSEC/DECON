@@ -19,10 +19,11 @@ from decon.ask import (
     size_warning,
 )
 from decon.audit import write_entry
-from decon.cli_validation import validate_args
+from decon.cli_validation import validate_args, validate_path_collisions
 from decon.config import (
     ConfigError,
     apply_config_to_engine,
+    apply_targets,
     get_audit_config,
     get_llm_config,
     init_config,
@@ -127,6 +128,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--redact",
         metavar="VALUES",
         help="Extra literal values to redact (comma-separated)",
+    )
+    parser.add_argument(
+        "--targets",
+        metavar="FILE",
+        help="Load engagement identifiers from a category:value file",
     )
     parser.add_argument(
         "--llm",
@@ -243,6 +249,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     err = validate_args(args)
+    if err:
+        print(f"Error: {err}", file=sys.stderr)
+        return 1
+    err = _validate_paths(args)
     if err:
         print(f"Error: {err}", file=sys.stderr)
         return 1
@@ -404,7 +414,7 @@ def _apply_cli_overrides(
     args: argparse.Namespace,
     engine: RedactionEngine,
 ) -> bool:
-    """Apply --enable/--disable/--redact/--import-map. False on error."""
+    """Apply CLI rule, target, literal, and mapping overrides. False on error."""
     for flag_value, action in (
         (args.enable, engine.enable_rule),
         (args.disable, engine.disable_rule),
@@ -418,6 +428,13 @@ def _apply_cli_overrides(
 
     if args.redact:
         engine.add_custom_values(_split_csv(args.redact), case_sensitive=False)
+
+    if args.targets:
+        try:
+            apply_targets(engine, args.targets)
+        except ConfigError as e:
+            print(f"Error loading targets: {e}", file=sys.stderr)
+            return False
 
     if args.import_map:
         try:
@@ -474,14 +491,17 @@ def _run_reverse(
 
     result = engine.unredact(text)
     _warn_unresolved(args, engine, result)
-    # Restoring re-materializes real values, so it belongs in the trail too.
+    restored_applied = engine.applied_for_unredaction(text)
+    if not _write_output(args, result, sensitive=True):
+        return 1
+    # Record only after the restored material was successfully emitted.
     _record_audit(
         args,
         config,
-        engine.applied_for_unredaction(text),
+        restored_applied,
         mode="restore" if args.unredact is None else "unredact",
     )
-    return 0 if _write_output(args, result) else 1
+    return 0
 
 
 def _run_redaction(
@@ -515,16 +535,14 @@ def _run_redaction(
         question_report = engine.redact_with_report(args.ask)
         redacted_question = question_report.text
         question_applied.extend(question_report.unique_applied())
-        redacted_question, question_findings, question_llm_applied = (
-            _review_with_llm(
-                args,
-                config,
-                engine,
-                redacted_question,
-                interactive=False,
-                announce=True,
-                auto_redact=True,
-            )
+        redacted_question, question_findings, question_llm_applied = _review_with_llm(
+            args,
+            config,
+            engine,
+            redacted_question,
+            interactive=False,
+            announce=True,
+            auto_redact=True,
         )
         question_applied.extend(question_llm_applied)
 
@@ -538,22 +556,26 @@ def _run_redaction(
             result = sync_report.text
             question_applied.extend(sync_report.unique_applied())
 
-    # Audit only the runs that actually emit redacted output. --check reports a
-    # count, --dry-run previews to stderr, and --diff prints the original text
-    # rather than a shareable artifact; none of them are a disclosure event, and
-    # writing the real values to disk on every CI --check would be a surprise.
-    # Recorded after the LLM review so operator-accepted findings are included.
-    if not (args.check or args.dry_run or args.diff):
-        _record_audit(
-            args,
-            config,
-            _unique_applied(applied + llm_applied + question_applied),
-            mode="ask" if args.ask is not None else "redact",
-        )
+    audit_applied = _unique_applied(applied + llm_applied + question_applied)
 
     if args.ask is not None:
         assert redacted_question is not None
-        return _run_ask(args, engine, config, redacted_question, result)
+        # Provider calls can fail after transmission. Record the attempt before
+        # crossing that trust boundary, without claiming a completed response.
+        _record_audit(
+            args,
+            config,
+            audit_applied,
+            mode="ask",
+            status="attempted",
+        )
+        return _run_ask(
+            args,
+            engine,
+            config,
+            redacted_question,
+            result,
+        )
     if args.check:
         return _run_check(args, applied, llm_findings, changed=changed)
     if args.dry_run:
@@ -563,6 +585,7 @@ def _run_redaction(
 
     if not _write_output(args, result):
         return 1
+    _record_audit(args, config, audit_applied, mode="redact")
     if not _export_map(args, engine):
         return 1
     _print_stats(args, engine)
@@ -588,7 +611,7 @@ def _run_ask(
     if not restored.endswith("\n"):
         restored += "\n"
 
-    if not _write_output(args, restored):
+    if not _write_output(args, restored, sensitive=True):
         return 1
     if not _export_map(args, engine):
         return 1
@@ -663,9 +686,8 @@ def _warn_unresolved(
 ) -> None:
     """Warn about placeholders left in restored text.
 
-    unredact() is a literal replacement, so a placeholder the model reformatted
-    (dropped zero-padding, wrapped in emphasis) silently survives and reads as
-    if it were real output. Say so rather than letting it pass.
+    Boundary-aware unredaction deliberately leaves a reformatted or embedded
+    placeholder untouched. Warn so it cannot silently read as real output.
     """
     if args.quiet:
         return
@@ -736,6 +758,7 @@ def _record_audit(
     applied: list[tuple[str, str, str]],
     *,
     mode: str,
+    status: str = "emitted",
     sources: list[str] | None = None,
 ) -> None:
     """Record this run's substitutions unless auditing is switched off."""
@@ -747,6 +770,7 @@ def _record_audit(
     write_entry(
         applied,
         mode=mode,
+        status=status,
         sources=sources or (args.files or None),
         path=audit_cfg.get("path"),
         quiet=args.quiet,
@@ -757,9 +781,7 @@ def _llm_enabled(args: argparse.Namespace, config: dict) -> bool:
     """Return whether LLM review is enabled for this invocation."""
     llm_cfg = get_llm_config(config)
     return bool(
-        args.llm
-        or os.environ.get("DECON_LLM") == "1"
-        or llm_cfg.get("enabled", False)
+        args.llm or os.environ.get("DECON_LLM") == "1" or llm_cfg.get("enabled", False)
     )
 
 
@@ -860,11 +882,21 @@ def _prompt_llm_review(findings: list[str]) -> list[str]:
     return selected
 
 
-def _write_output(args: argparse.Namespace, result: str) -> bool:
+def _write_output(
+    args: argparse.Namespace,
+    result: str,
+    *,
+    sensitive: bool = False,
+) -> bool:
     """Write result to the configured output destination."""
     try:
         if args.output:
-            write_file(result, args.output, quiet=args.quiet)
+            write_file(
+                result,
+                args.output,
+                quiet=args.quiet,
+                sensitive=sensitive,
+            )
         elif args.clipboard:
             return write_clipboard(result, quiet=args.quiet)
         else:
@@ -924,7 +956,9 @@ def _batch_process(
     try:
         os.makedirs(args.output_dir, exist_ok=True)
     except OSError as e:
-        print(f"Error creating output directory {args.output_dir}: {e}", file=sys.stderr)
+        print(
+            f"Error creating output directory {args.output_dir}: {e}", file=sys.stderr
+        )
         return 1
     output_paths = _build_batch_output_paths(args.files, args.output_dir)
 
@@ -946,13 +980,6 @@ def _batch_process(
             interactive=False,
             announce=True,
         )
-        _record_audit(
-            args,
-            config,
-            report.unique_applied() + llm_applied,
-            mode="redact",
-            sources=[path],
-        )
         out_path = output_paths[path]
         try:
             out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -960,6 +987,13 @@ def _batch_process(
         except OSError as e:
             print(f"Error writing {out_path}: {e}", file=sys.stderr)
             return 1
+        _record_audit(
+            args,
+            config,
+            report.unique_applied() + llm_applied,
+            mode="redact",
+            sources=[path],
+        )
 
     if not _export_map(args, engine):
         return 1
@@ -1000,9 +1034,45 @@ def _build_batch_output_paths(
     return output_paths
 
 
-def _stats_for_applied(
-    applied: list[tuple[str, str, str]]
-) -> dict[str, int]:
+def _validate_paths(args: argparse.Namespace) -> str | None:
+    """Preflight all file sources and destinations before reading or writing."""
+    sources: list[tuple[str, str | Path]] = [
+        (f"input file {path!r}", path) for path in args.files
+    ]
+    for label, path in (
+        ("--targets", args.targets),
+        ("--import-map", args.import_map),
+        ("--unredact map", args.unredact),
+    ):
+        if path:
+            sources.append((label, path))
+    if args.restore is not None:
+        try:
+            sources.append(("--restore session", session_path(args.restore)))
+        except StateError:
+            # validate_args owns the user-facing session-name error.
+            pass
+
+    destinations: list[tuple[str, str | Path]] = []
+    if args.output:
+        destinations.append(("--output", args.output))
+    if args.export_map:
+        destinations.append(("--export-map", args.export_map))
+    if args.session is not None:
+        try:
+            destinations.append(("--session", session_path(args.session)))
+        except StateError:
+            pass
+    if args.output_dir and args.files:
+        for source, path in _build_batch_output_paths(
+            args.files, args.output_dir
+        ).items():
+            destinations.append((f"batch output for {source!r}", path))
+
+    return validate_path_collisions(sources, destinations)
+
+
+def _stats_for_applied(applied: list[tuple[str, str, str]]) -> dict[str, int]:
     """Return category counts for applied redactions."""
     stats: dict[str, int] = {}
     for category, _real, _placeholder in applied:

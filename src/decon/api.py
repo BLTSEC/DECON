@@ -112,11 +112,12 @@ def desanitize(text: str, mapping: dict[str, str]) -> str:
         raise ValueError(
             "mapping must contain non-empty string placeholders and original values"
         )
-    # Longest first, so a placeholder that is a prefix of another cannot be
-    # partially replaced.
-    for placeholder in sorted(mapping, key=len, reverse=True):
-        text = text.replace(placeholder, mapping[placeholder])
-    return text
+    # Reuse the engine's boundary-aware restoration. Literal str.replace()
+    # would turn a mutated token such as [IPV4_REDACTED_0001]0 into a plausible
+    # but incorrect address.
+    engine = RedactionEngine(rules=[])
+    engine.reverse_mapping.update(mapping)
+    return engine.unredact(text)
 
 
 def ask_safely(
@@ -147,11 +148,14 @@ def ask_safely(
     report = engine.redact_with_report(prompt)
     mapping = engine.reverse_map()
 
+    # A provider can fail after receiving the request, so record the attempt
+    # before crossing the trust boundary without claiming a completed response.
     audit_config = get_audit_config(config)
     if audit and audit_config.get("enabled", True):
         write_entry(
             report.unique_applied(),
             mode="ask_safely",
+            status="attempted",
             sources=[f"<{provider}>"],
             path=audit_config.get("path"),
             quiet=True,
@@ -166,4 +170,6 @@ def ask_safely(
         host=host,
         max_tokens=max_tokens,
     )
-    return desanitize(answer, mapping), mapping
+    restored = desanitize(answer, mapping)
+
+    return restored, mapping

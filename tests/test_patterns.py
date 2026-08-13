@@ -1,6 +1,5 @@
 """Tests for individual pattern rules."""
 
-
 import pytest
 
 from decon.engine import RedactionEngine
@@ -175,7 +174,10 @@ class TestProseSecret:
         [
             ("The password is `Lantern-Cobalt-47!`.", "Lantern-Cobalt-47!"),
             ('The password was "Summer2024!" until rotation.', "Summer2024!"),
-            ("Service account credential is 'Archive-Meteor-82!'", "Archive-Meteor-82!"),
+            (
+                "Service account credential is 'Archive-Meteor-82!'",
+                "Archive-Meteor-82!",
+            ),
             ("The API key is `sk-abc123def456`.", "sk-abc123def456"),
             ("Passphrase set to `correct-horse`.", "correct-horse"),
         ],
@@ -350,6 +352,25 @@ class TestUrlInMarkdown:
         assert categories == {"url"}
         assert report.text.endswith("`.")
 
+    def test_private_repository_url_is_not_assumed_public(self):
+        private_url = "https://github.com/SecretClient/Project-Nighthawk/issues/42"
+
+        result = RedactionEngine().redact(private_url)
+
+        assert private_url not in result
+        assert result == "URL_REDACTED_01"
+
+
+class TestPrivateKeyFailClosed:
+    def test_truncated_private_key_is_redacted_through_eof(self):
+        truncated = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA"
+        engine = RedactionEngine()
+
+        redacted = engine.redact(truncated)
+
+        assert redacted == "PRIVATE_KEY_REDACTED_01"
+        assert engine.unredact(redacted) == truncated
+
 
 class TestSmbNetbiosNameExtended:
     # BUG-7: machine names in CN= LDAP DN context must also be redacted
@@ -445,13 +466,19 @@ class TestAdDomainUserSlash:
 
     def test_no_match_ssdp_upnp(self):
         # BUG-8: nmap service description should not be redacted as AD user
-        assert _AD_DOMAIN_USER_SLASH.search("Microsoft HTTPAPI httpd 2.0 (SSDP/UPnP)") is None
+        assert (
+            _AD_DOMAIN_USER_SLASH.search("Microsoft HTTPAPI httpd 2.0 (SSDP/UPnP)")
+            is None
+        )
 
     def test_no_match_ldap_path_component(self):
         # BUG-8: LDAP referral URL path /DC=... should not match
-        assert _AD_DOMAIN_USER_SLASH.search(
-            "ref: ldap://DomainDnsZones.north.sevenkingdoms.local/DC=DomainDnsZones"
-        ) is None
+        assert (
+            _AD_DOMAIN_USER_SLASH.search(
+                "ref: ldap://DomainDnsZones.north.sevenkingdoms.local/DC=DomainDnsZones"
+            )
+            is None
+        )
 
     def test_no_match_short_abbreviation(self):
         assert _AD_DOMAIN_USER_SLASH.search("GNU/Linux") is None
@@ -478,7 +505,9 @@ class TestImpacketStatusUser:
     # BUG-10: GetNPUsers and netexec status lines expose usernames
 
     def test_getnpusers_user_line(self):
-        m = _IMPACKET_STATUS_USER.search("[-] User jon.snow doesn't have UF_DONT_REQUIRE_PREAUTH set")
+        m = _IMPACKET_STATUS_USER.search(
+            "[-] User jon.snow doesn't have UF_DONT_REQUIRE_PREAUTH set"
+        )
         assert m is not None
         assert m.group(2) == "jon.snow"
 
@@ -549,7 +578,9 @@ class TestLdapDescription:
 
     def test_matches_builtin_description(self):
         # built-in descriptions are also redacted (acceptable collateral)
-        m = _LDAP_DESCRIPTION.search("description: Built-in account for administering the computer/domain")
+        m = _LDAP_DESCRIPTION.search(
+            "description: Built-in account for administering the computer/domain"
+        )
         assert m is not None
 
     def test_preserves_prefix(self):

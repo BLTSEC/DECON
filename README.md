@@ -125,10 +125,13 @@ decon --enable ssn report.txt
 DECON avoids several common false positives:
 
 - Loopback, unspecified, link-local, and documentation IPv4 ranges
-- Public tool and reference URLs such as GitHub and MITRE ATT&CK
 - Standard Nmap boilerplate URLs
 - Windows built-in identities and registry paths
 - Nmap port lists following `-p`
+
+Other URLs are redacted by default. A public hosting domain can still contain a
+private organization, repository, gist, or signed path; explicitly allowlist a
+known public reference when you want it preserved.
 
 Use an allowlist when a value must remain unchanged:
 
@@ -361,7 +364,7 @@ Every substitution is appended to `~/.local/state/decon/audit.jsonl` as one JSON
 record per run:
 
 ```json
-{"ts":"2026-07-24T12:00:00+00:00","mode":"redact","sources":["scan.txt"],
+{"ts":"2026-07-24T12:00:00+00:00","mode":"redact","status":"emitted","sources":["scan.txt"],
  "substitutions":[{"category":"hostname","original":"dc01.corp.local",
                    "placeholder":"[HOST_REDACTED_0001]"}]}
 ```
@@ -492,6 +495,13 @@ text, and what `desanitize()` expects. Note this is the inverse of
 `RedactionEngine.mapping`, which is keyed by the original value.
 
 ### Per-engagement targets file
+
+Load a target file directly from the CLI:
+
+```bash
+decon --targets acme-targets.txt notes.md
+decon --targets acme-targets.txt --llm --ask "What should I investigate next?" notes.md
+```
 
 Engagement identifiers can come from a plain-text file instead of the TOML
 config — one `category:value` per line, where category is one of `domain`,

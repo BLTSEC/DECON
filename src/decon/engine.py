@@ -25,14 +25,20 @@ _HOST_PLACEHOLDER = re.compile(
 # patterns._TYPED_PLACEHOLDER (which validates an exact known type) so that a
 # reformatted or foreign placeholder is still recognised as one.
 _ANY_PLACEHOLDER = re.compile(
-    r"\[[A-Z][A-Z0-9_]*_REDACTED_\d+\]"
+    r"\[[A-Z][A-Z0-9_]*_REDACTED_\d+\](?:/\d{1,3})?"
     r"|(?<![\w])(?:[A-Z][A-Z0-9_]*_)?(?:HASH|KEY|DUMP|USER|PATH|SPN|SID)_\d+(?![\w])"
     r"|(?<![\w])[A-Z][A-Z0-9_]*_REDACTED_\d+(?![\w])"
+    r"|(?<![\w])HOST_\d+(?:\.example\.internal)?(?![.\w])"
 )
 
 # RFC 2849 LDIF line folding: continuation lines start with a single space.
-_LDAP_FOLD = re.compile(r"\n (?=\S)")
-_LDAP_MARKER = re.compile(r"(?:^|\n)(?:dn|memberOf|ref): ", re.MULTILINE)
+# Scope unfolding to LDAP attributes instead of stripping indentation globally
+# as soon as a document happens to contain one LDAP marker.
+_LDAP_FOLDED_VALUE = re.compile(
+    r"^(?:dn|memberOf|ref):[^\r\n]*(?:\r?\n [^\r\n]*)+",
+    re.IGNORECASE | re.MULTILINE,
+)
+_LDAP_FOLD = re.compile(r"\r?\n (?=\S)")
 
 
 @dataclass
@@ -80,33 +86,67 @@ class RedactionEngine:
     def _unfold_ldap(text: str) -> str:
         """Unfold LDAP/LDIF line continuations (RFC 2849).
 
-        Only applied when LDAP markers (dn:, memberOf:, ref:) are detected
-        to avoid mangling non-LDAP output like ASCII art banners.
+        Only continuation lines belonging to recognized LDAP attributes are
+        unfolded. Indented prose elsewhere in a mixed document is preserved.
         """
-        if not _LDAP_MARKER.search(text):
-            return text
-        return _LDAP_FOLD.sub("", text)
+        return _LDAP_FOLDED_VALUE.sub(
+            lambda match: _LDAP_FOLD.sub("", match.group(0)),
+            text,
+        )
 
     def redact_with_report(self, text: str) -> RedactionReport:
         """Redact text and return details about replacements applied."""
         text = self._unfold_ldap(text)
+        # Reserve every placeholder token already present in the input. Without
+        # this, a fresh value can be assigned the same token and unredaction
+        # silently replaces both the foreign token and the value we redacted.
+        transient_reservations: list[str] = []
+        for match in _ANY_PLACEHOLDER.finditer(text):
+            placeholder = match.group(0)
+            reservations = {placeholder}
+            host_match = _HOST_PLACEHOLDER.fullmatch(placeholder)
+            if host_match:
+                index = int(
+                    host_match.group(1) or host_match.group(2) or host_match.group(3)
+                )
+                # Legacy, FQDN, short, and modern host tokens share one logical
+                # namespace even though their rendered strings differ.
+                reservations.update(
+                    {
+                        f"[HOST_REDACTED_{index:04d}]",
+                        f"[HOST_SHORT_REDACTED_{index:04d}]",
+                        f"HOST_{index:02d}",
+                        f"HOST_{index:02d}.example.internal",
+                    }
+                )
+            for reservation in reservations:
+                if reservation not in self.mapping:
+                    self.mapping[reservation] = reservation
+                    transient_reservations.append(reservation)
         existing_hostname_placeholders = {
             value
             for value in self.mapping.values()
             if _HOST_PLACEHOLDER.fullmatch(value)
         }
         applied: list[AppliedRedaction] = []
-        for rule in self.rules:
-            if not rule.enabled:
-                continue
-            text = rule.apply(text, self.mapping, self.counters, applied)
-        text = self._retrospective_replace(text, applied)
-        if not existing_hostname_placeholders:
-            text, applied = self._normalize_hostname_placeholders(text, applied)
-        for _category, original, placeholder in applied:
-            if original != placeholder:
-                self.reverse_mapping.setdefault(placeholder, original)
-        return RedactionReport(text=text, applied=applied)
+        try:
+            for rule in self.rules:
+                if not rule.enabled:
+                    continue
+                text = rule.apply(text, self.mapping, self.counters, applied)
+            text = self._retrospective_replace(text, applied)
+            if not existing_hostname_placeholders:
+                text, applied = self._normalize_hostname_placeholders(text, applied)
+            for _category, original, placeholder in applied:
+                if original != placeholder:
+                    self.reverse_mapping.setdefault(placeholder, original)
+            return RedactionReport(text=text, applied=applied)
+        finally:
+            # Reservations are allocation guards, not user mappings. Keeping
+            # them would pollute exported maps and violate double-pass behavior.
+            for placeholder in transient_reservations:
+                if self.mapping.get(placeholder) == placeholder:
+                    self.mapping.pop(placeholder, None)
 
     def _retrospective_replace(
         self,
@@ -153,34 +193,66 @@ class RedactionEngine:
         if not candidates:
             return text
 
-        # Sort longest-first to avoid partial replacement
-        candidates.sort(key=lambda x: len(x[0]), reverse=True)
-        for original, placeholder in candidates:
-            # Domain-type entries (example*.internal) use a permissive lookbehind
-            # that allows '.' before the match — catches subdomains like
-            # _msdcs.sevenkingdoms.local where the domain appears after a dot.
-            # Hostname/user entries use strict boundaries to avoid partial matches.
-            if placeholder.startswith("[DOMAIN_REDACTED_"):
-                lookbehind = r"(?<!\w)"
-            else:
-                lookbehind = r"(?<![.\w])"
+        # Apply each boundary class in a single pass. The previous one-regex-per-
+        # identity loop made large AD datasets quadratic in document size.
+        domain_candidates = [
+            item for item in candidates if item[1].startswith("[DOMAIN_REDACTED_")
+        ]
+        strict_candidates = [
+            item for item in candidates if not item[1].startswith("[DOMAIN_REDACTED_")
+        ]
+
+        def _replace_candidates(
+            current: str,
+            items: list[tuple[str, str]],
+            lookbehind: str,
+        ) -> str:
+            if not items:
+                return current
+            by_value: dict[str, tuple[str, str]] = {}
+            for original, placeholder in sorted(
+                items, key=lambda item: len(item[0]), reverse=True
+            ):
+                by_value.setdefault(original.casefold(), (original, placeholder))
+            alternatives = "|".join(
+                re.escape(original) for original, _placeholder in by_value.values()
+            )
             pattern = re.compile(
-                lookbehind + re.escape(original) + r"(?![.\w])",
+                lookbehind + "(?:" + alternatives + r")(?![.\w])",
                 re.IGNORECASE,
             )
-            new_text = pattern.sub(placeholder, text)
-            if new_text != text:
-                # Track the replacement if new occurrences were found
+
+            def _replace(match: re.Match[str]) -> str:
+                original, placeholder = by_value[match.group(0).casefold()]
                 if placeholder.startswith(("[HOST_", "HOST_")):
-                    cat = "hostname"
+                    category = "hostname"
                 elif placeholder.startswith("DOMAIN_USER_"):
-                    cat = "ad_domain_user"
+                    category = "ad_domain_user"
                 else:
-                    cat = "domain"
-                applied.append((cat, original, placeholder))
-                text = new_text
+                    category = "domain"
+                applied.append((category, original, placeholder))
+                return placeholder
+
+            return pattern.sub(_replace, current)
+
+        # Domains allow a preceding dot so parent domains inside a subdomain are
+        # found; hostnames and users retain strict standalone boundaries.
+        text = _replace_candidates(text, domain_candidates, r"(?<!\w)")
+        text = _replace_candidates(text, strict_candidates, r"(?<![.\w])")
 
         return text
+
+    @staticmethod
+    def _replacement_pattern(placeholders: set[str]) -> re.Pattern[str] | None:
+        """Compile a pattern matching only complete, standalone placeholders."""
+        if not placeholders:
+            return None
+        alternatives = "|".join(
+            re.escape(value) for value in sorted(placeholders, key=len, reverse=True)
+        )
+        # Reject alphanumeric extensions (TOKEN0) and domain-like embedding
+        # (TOKEN.attacker.test), while allowing ordinary sentence punctuation.
+        return re.compile(r"(?<![-.\w])(?:" + alternatives + r")(?!\w|[-.]\w)")
 
     def reverse_map(self) -> dict[str, str]:
         """Return placeholder -> original for everything this engine knows.
@@ -197,10 +269,10 @@ class RedactionEngine:
     def unredact(self, text: str) -> str:
         """Replace placeholders with original values using reverse mapping."""
         reverse = self.reverse_map()
-        # Sort by length (longest first) to avoid partial replacements
-        for placeholder in sorted(reverse, key=len, reverse=True):
-            text = text.replace(placeholder, reverse[placeholder])
-        return text
+        pattern = self._replacement_pattern(set(reverse))
+        if pattern is None:
+            return text
+        return pattern.sub(lambda match: reverse[match.group(0)], text)
 
     def applied_for_unredaction(self, text: str) -> list[AppliedRedaction]:
         """Return the mappings that unredact() would use on this text.
@@ -209,11 +281,18 @@ class RedactionEngine:
         than the whole map.
         """
         reverse = self.reverse_map()
-        return [
-            ("restore", original, placeholder)
-            for placeholder, original in reverse.items()
-            if placeholder in text
-        ]
+        pattern = self._replacement_pattern(set(reverse))
+        if pattern is None:
+            return []
+        restored: list[AppliedRedaction] = []
+        seen: set[str] = set()
+        for match in pattern.finditer(text):
+            placeholder = match.group(0)
+            if placeholder in seen:
+                continue
+            seen.add(placeholder)
+            restored.append(("restore", reverse[placeholder], placeholder))
+        return restored
 
     def unresolved_placeholders(self, text: str) -> list[str]:
         """Return DECON-shaped placeholders in text that this engine cannot map.
@@ -222,12 +301,11 @@ class RedactionEngine:
         never restored — usually because it was reformatted (zero-padding
         dropped, wrapped in markdown) or belongs to a different map.
         """
-        known = set(self.reverse_map())
         seen: set[str] = set()
         unresolved: list[str] = []
         for match in _ANY_PLACEHOLDER.finditer(text):
             value = match.group(0)
-            if value in known or value in seen:
+            if value in seen:
                 continue
             seen.add(value)
             unresolved.append(value)
@@ -264,9 +342,7 @@ class RedactionEngine:
             ):
                 self.reverse_mapping.pop(previous, None)
 
-    def add_custom_values(
-        self, values: list[str], case_sensitive: bool = True
-    ) -> None:
+    def add_custom_values(self, values: list[str], case_sensitive: bool = True) -> None:
         """Add custom literal values to redact."""
         for value in values:
             if not isinstance(value, str) or not value.strip():
@@ -514,7 +590,9 @@ class RedactionEngine:
             and count >= 0
             for cat, count in imported_counters.items()
         ):
-            raise ValueError("counters must be an object containing non-negative integers")
+            raise ValueError(
+                "counters must be an object containing non-negative integers"
+            )
 
         self.mapping.update(imported_mapping)
         self.reverse_mapping.update(imported_reverse)
@@ -596,7 +674,9 @@ class RedactionEngine:
             if old_id != index
         }
         if not remap_ids:
-            self.counters["hostname"] = max(self.counters.get("hostname", 0), len(ordered_ids))
+            self.counters["hostname"] = max(
+                self.counters.get("hostname", 0), len(ordered_ids)
+            )
             return text, applied
 
         text = _HOST_PLACEHOLDER.sub(

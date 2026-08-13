@@ -11,7 +11,9 @@ from decon.engine import RedactionEngine
 class TestConsistentMapping:
     def test_same_ip_same_placeholder(self):
         engine = RedactionEngine()
-        result = engine.redact("Server 10.4.12.50 can't reach 10.4.12.1. Retry 10.4.12.50.")
+        result = engine.redact(
+            "Server 10.4.12.50 can't reach 10.4.12.1. Retry 10.4.12.50."
+        )
         # First and second IPs get distinct typed placeholders.
         assert "10.4.12.50" not in result
         assert "10.4.12.1" not in result
@@ -267,7 +269,7 @@ class TestJWTRedaction:
 class TestContextSecret:
     def test_api_key_value_redacted(self):
         engine = RedactionEngine()
-        result = engine.redact('api_key=sk_live_abc123def456ghi')
+        result = engine.redact("api_key=sk_live_abc123def456ghi")  # gitleaks:allow
         assert "sk_live_abc123def456ghi" not in result
         assert "api_key=" in result  # label preserved
 

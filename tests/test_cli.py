@@ -1,6 +1,8 @@
 """Tests for CLI interface."""
 
 import json
+import os
+import stat
 import sys
 from io import StringIO
 from unittest.mock import patch
@@ -101,6 +103,37 @@ class TestCLIBasic:
         captured = capsys.readouterr()
         assert "HEARTSBANE" not in captured.out
 
+    def test_targets_file_applies_typed_engagement_identifiers(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        targets = tmp_path / "targets.txt"
+        targets.write_text(
+            "domain:acme.com\nusername:jsmith\nhostname:DC01\nshare:HR-Data\n"
+        )
+        monkeypatch.setattr(
+            "sys.stdin",
+            StringIO("DC01.acme.com jsmith DC01 HR-Data\n"),
+        )
+
+        assert main(["--targets", str(targets)]) == 0
+        output = capsys.readouterr().out
+
+        assert "acme.com" not in output
+        assert "jsmith" not in output
+        assert "DC01" not in output
+        assert "HR-Data" not in output
+        assert "DOMAIN_USER_" in output
+
+    def test_invalid_targets_file_fails_before_reading_input(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        targets = tmp_path / "targets.txt"
+        targets.write_text("unknown:value\n")
+        monkeypatch.setattr("sys.stdin", StringIO("ordinary input\n"))
+
+        assert main(["--targets", str(targets)]) == 1
+        assert "Error loading targets" in capsys.readouterr().err
+
     def test_verbose(self, monkeypatch, capsys):
         monkeypatch.setattr("sys.stdin", StringIO("10.4.12.50 admin@test.com\n"))
         ret = main(["-v"])
@@ -190,8 +223,12 @@ class TestCLIBasic:
         assert ret == 0
         assert (output_dir / "a" / "scan.redacted.txt").exists()
         assert (output_dir / "b" / "scan.redacted.txt").exists()
-        assert (output_dir / "a" / "scan.redacted.txt").read_text().strip() == "[IPV4_REDACTED_0001]"
-        assert (output_dir / "b" / "scan.redacted.txt").read_text().strip() == "[IPV4_REDACTED_0002]"
+        assert (
+            output_dir / "a" / "scan.redacted.txt"
+        ).read_text().strip() == "[IPV4_REDACTED_0001]"
+        assert (
+            output_dir / "b" / "scan.redacted.txt"
+        ).read_text().strip() == "[IPV4_REDACTED_0002]"
 
     def test_invalid_config_reports_clean_error(self, tmp_path, monkeypatch, capsys):
         config_path = tmp_path / "decon.toml"
@@ -202,9 +239,7 @@ class TestCLIBasic:
         captured = capsys.readouterr()
         assert "Invalid TOML in config" in captured.err
 
-    def test_tmux_failure_does_not_fallback_to_stdin(
-        self, monkeypatch, capsys
-    ):
+    def test_tmux_failure_does_not_fallback_to_stdin(self, monkeypatch, capsys):
         monkeypatch.setattr("decon.cli.capture_tmux_pane", lambda quiet=False: None)
         monkeypatch.setattr("sys.stdin", StringIO("10.4.12.50\n"))
         ret = main(["--tmux"])
@@ -212,9 +247,7 @@ class TestCLIBasic:
         captured = capsys.readouterr()
         assert "[IPV4_REDACTED_0001]" not in captured.out
 
-    def test_clipboard_failure_does_not_fallback_to_stdin(
-        self, monkeypatch, capsys
-    ):
+    def test_clipboard_failure_does_not_fallback_to_stdin(self, monkeypatch, capsys):
         monkeypatch.setattr("decon.cli.read_clipboard", lambda quiet=False: None)
         monkeypatch.setattr("sys.stdin", StringIO("10.4.12.50\n"))
         ret = main(["--clipboard-in"])
@@ -292,18 +325,23 @@ class TestPromptLLMReview:
 class TestLLMInteractiveFlow:
     def test_interactive_redacts_selected(self, monkeypatch, capsys):
         """When LLM flags values and user selects them, they get redacted."""
-        monkeypatch.setattr(
-            "sys.stdin", StringIO("Logged in as jimmy.johns on DC01\n")
-        )
+        monkeypatch.setattr("sys.stdin", StringIO("Logged in as jimmy.johns on DC01\n"))
         monkeypatch.setattr(
             "decon.cli.llm_review",
             lambda text, model, host, quiet: "FOUND: jimmy.johns\nFOUND: DC01",
         )
-        monkeypatch.setattr("sys.stderr", type("FakeTTY", (), {
-            "write": sys.stderr.write,
-            "flush": sys.stderr.flush,
-            "isatty": lambda self: True,
-        })())
+        monkeypatch.setattr(
+            "sys.stderr",
+            type(
+                "FakeTTY",
+                (),
+                {
+                    "write": sys.stderr.write,
+                    "flush": sys.stderr.flush,
+                    "isatty": lambda self: True,
+                },
+            )(),
+        )
         tty = StringIO("all\n")
         with patch("builtins.open", return_value=tty):
             ret = main(["--llm"])
@@ -315,9 +353,7 @@ class TestLLMInteractiveFlow:
 
     def test_noninteractive_prints_warnings(self, monkeypatch, capsys):
         """When stderr is not a TTY, fall back to warning-only output."""
-        monkeypatch.setattr(
-            "sys.stdin", StringIO("Logged in as jimmy.johns on DC01\n")
-        )
+        monkeypatch.setattr("sys.stdin", StringIO("Logged in as jimmy.johns on DC01\n"))
         monkeypatch.setattr(
             "decon.cli.llm_review",
             lambda text, model, host, quiet: "FOUND: jimmy.johns\nFOUND: DC01",
@@ -328,9 +364,7 @@ class TestLLMInteractiveFlow:
         assert "FOUND: jimmy.johns" in captured.err
         assert "jimmy.johns" in captured.out
 
-    def test_finding_containing_clean_is_not_discarded(
-        self, monkeypatch, capsys
-    ):
+    def test_finding_containing_clean_is_not_discarded(self, monkeypatch, capsys):
         monkeypatch.setattr("sys.stdin", StringIO("Project CLEANROOM\n"))
         monkeypatch.setattr(
             "decon.cli.llm_review",
@@ -385,14 +419,19 @@ class TestLLMInteractiveFlow:
             "decon.cli.llm_review",
             lambda text, model, host, quiet: calls.append(text) or "CLEAN",
         )
-        assert main([
-            str(first),
-            str(second),
-            "--output-dir",
-            str(output),
-            "--llm",
-            "--quiet",
-        ]) == 0
+        assert (
+            main(
+                [
+                    str(first),
+                    str(second),
+                    "--output-dir",
+                    str(output),
+                    "--llm",
+                    "--quiet",
+                ]
+            )
+            == 0
+        )
         assert calls == ["first ordinary value\n", "second ordinary value\n"]
 
     def test_quiet_dry_run_is_silent(self, monkeypatch, capsys):
@@ -410,14 +449,85 @@ class TestCLIFailureStatus:
         assert ret == 1
         assert "Error writing map" in capsys.readouterr().err
 
+    def test_output_cannot_overwrite_input(self, tmp_path, capsys):
+        source = tmp_path / "notes.txt"
+        original = "Server 10.4.12.50\n"
+        source.write_text(original)
+
+        assert main([str(source), "--output", str(source)]) == 1
+
+        assert source.read_text() == original
+        assert "would overwrite input file" in capsys.readouterr().err
+
+    def test_output_and_export_map_cannot_share_a_path(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        destination = tmp_path / "same.txt"
+        monkeypatch.setattr("sys.stdin", StringIO("Server 10.4.12.50\n"))
+
+        assert (
+            main(
+                [
+                    "--output",
+                    str(destination),
+                    "--export-map",
+                    str(destination),
+                ]
+            )
+            == 1
+        )
+
+        assert not destination.exists()
+        assert "resolve to the same path" in capsys.readouterr().err
+
+    def test_export_map_cannot_overwrite_input(self, tmp_path, capsys):
+        source = tmp_path / "notes.txt"
+        original = "Server 10.4.12.50\n"
+        source.write_text(original)
+
+        assert main([str(source), "--export-map", str(source)]) == 1
+
+        assert source.read_text() == original
+        assert "would overwrite input file" in capsys.readouterr().err
+
+    def test_unredacted_file_is_owner_only(self, tmp_path, monkeypatch, capsys):
+        engine = RedactionEngine()
+        placeholder = engine.redact("Server 10.4.12.50\n")
+        mapping = tmp_path / "mapping.json"
+        engine.export_map(str(mapping))
+        destination = tmp_path / "restored.txt"
+        destination.write_text("old")
+        os.chmod(destination, 0o644)
+        monkeypatch.setattr("sys.stdin", StringIO(placeholder))
+
+        assert (
+            main(
+                [
+                    "--unredact",
+                    str(mapping),
+                    "--output",
+                    str(destination),
+                ]
+            )
+            == 0
+        )
+        capsys.readouterr()
+
+        assert "10.4.12.50" in destination.read_text()
+        assert stat.S_IMODE(destination.stat().st_mode) == 0o600
+
     def test_imported_map_does_not_override_cli_allowlist(
         self, tmp_path, monkeypatch, capsys
     ):
         path = tmp_path / "map.json"
-        path.write_text(json.dumps({
-            "mapping": {"10.4.12.50": "[IPV4_REDACTED_0001]"},
-            "counters": {"ipv4": 1},
-        }))
+        path.write_text(
+            json.dumps(
+                {
+                    "mapping": {"10.4.12.50": "[IPV4_REDACTED_0001]"},
+                    "counters": {"ipv4": 1},
+                }
+            )
+        )
         monkeypatch.setattr("sys.stdin", StringIO("10.4.12.50\n"))
         ret = main(["--import-map", str(path), "--allow", "10.4.12.50"])
         assert ret == 0
@@ -428,20 +538,29 @@ class TestCLIFailureStatus:
     ):
         imported = tmp_path / "imported.json"
         exported = tmp_path / "exported.json"
-        imported.write_text(json.dumps({
-            "mapping": {"10.4.12.50": "[IPV4_REDACTED_0001]"},
-            "counters": {"ipv4": 1},
-        }))
+        imported.write_text(
+            json.dumps(
+                {
+                    "mapping": {"10.4.12.50": "[IPV4_REDACTED_0001]"},
+                    "counters": {"ipv4": 1},
+                }
+            )
+        )
         monkeypatch.setattr("sys.stdin", StringIO("10.4.12.50\n"))
-        assert main([
-            "--import-map",
-            str(imported),
-            "--allow",
-            "10.4.12.50",
-            "--export-map",
-            str(exported),
-            "--quiet",
-        ]) == 0
+        assert (
+            main(
+                [
+                    "--import-map",
+                    str(imported),
+                    "--allow",
+                    "10.4.12.50",
+                    "--export-map",
+                    str(exported),
+                    "--quiet",
+                ]
+            )
+            == 0
+        )
         engine = RedactionEngine()
         engine.import_map(str(exported))
         assert engine.redact("10.4.12.50") == "10.4.12.50"

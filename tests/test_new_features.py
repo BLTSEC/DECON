@@ -39,7 +39,10 @@ class TestNTLMHashPattern:
         line = "Administrator:500:aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0:::"
         m = _NTLM_HASH.search(line)
         assert m is not None
-        assert m.group() == "aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0"
+        assert (
+            m.group()
+            == "aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0"
+        )
 
     def test_no_match_short_hex(self):
         assert _NTLM_HASH.search("abcdef:123456") is None
@@ -110,9 +113,7 @@ class TestADDomainUserPattern:
     def test_netexec_credential_format(self):
         """Full netexec line: domain, user, and password all redacted."""
         engine = RedactionEngine()
-        result = engine.redact(
-            "[+] megacorp.local\\svc_bes:Sheffield19 (Pwn3d!)"
-        )
+        result = engine.redact("[+] megacorp.local\\svc_bes:Sheffield19 (Pwn3d!)")
         assert "megacorp.local" not in result
         assert "svc_bes" not in result
         assert "Sheffield19" not in result
@@ -333,9 +334,7 @@ class TestUnredact:
         original = "Server 10.4.12.50"
         redacted = engine1.redact(original)
 
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False
-        ) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             path = f.name
         try:
             engine1.export_map(path)
@@ -355,6 +354,95 @@ class TestUnredact:
         assert "10.4.12.50" in result
         restored = engine.unredact(result)
         assert "10.4.12.50" in restored
+
+    def test_preexisting_placeholder_is_reserved(self):
+        engine = RedactionEngine()
+        original = "[IPV4_REDACTED_0001] and 10.23.45.67"
+
+        redacted = engine.redact(original)
+
+        assert redacted == "[IPV4_REDACTED_0001] and [IPV4_REDACTED_0002]"
+        assert engine.unredact(redacted) == original
+        assert "[IPV4_REDACTED_0001]" not in engine.mapping
+
+    def test_preexisting_bare_placeholder_is_reserved(self):
+        engine = RedactionEngine()
+        original = "DOMAIN_USER_01 and tool -u real.admin"
+
+        redacted = engine.redact(original)
+
+        assert redacted == "DOMAIN_USER_01 and tool -u DOMAIN_USER_02"
+        assert engine.unredact(redacted) == original
+
+    def test_preexisting_cidr_index_is_reserved_across_masks(self):
+        engine = RedactionEngine()
+        original = "[CIDR_REDACTED_0001]/24 and 10.23.0.0/16"
+
+        redacted = engine.redact(original)
+
+        assert redacted == "[CIDR_REDACTED_0001]/24 and [CIDR_REDACTED_0002]/16"
+        assert engine.unredact(redacted) == original
+
+    def test_preexisting_legacy_hostname_placeholder_is_reserved(self):
+        engine = RedactionEngine()
+        original = "HOST_01.example.internal and dc01.corp.local"
+
+        redacted = engine.redact(original)
+
+        assert redacted == "HOST_01.example.internal and [HOST_REDACTED_0002]"
+        assert engine.unredact(redacted) == original
+
+    @pytest.mark.parametrize(
+        "mutated",
+        [
+            "[IPV4_REDACTED_0001]0",
+            "[IPV4_REDACTED_0001].attacker.test",
+        ],
+    )
+    def test_unredact_rejects_embedded_placeholder_prefix(self, mutated):
+        engine = RedactionEngine()
+        engine.mapping["10.23.45.67"] = "[IPV4_REDACTED_0001]"
+
+        assert engine.unredact(mutated) == mutated
+        assert engine.unresolved_placeholders(mutated) == ["[IPV4_REDACTED_0001]"]
+
+    @pytest.mark.parametrize(
+        "original",
+        [
+            "Domain: corp.local.",
+            "Domain: corp.local0.",
+            "Domain=corp.local, next",
+            "dn: CN=alice,DC=corp,DC=local",
+        ],
+    )
+    def test_specialized_domain_formats_round_trip_exactly(self, original):
+        engine = RedactionEngine()
+        redacted = engine.redact(original)
+
+        assert engine.unredact(redacted) == original
+
+    def test_ldap_composite_mapping_survives_export_import(self, tmp_path):
+        first = RedactionEngine()
+        original = "dn: CN=alice,DC=corp,DC=local"
+        redacted = first.redact(original)
+        mapping = tmp_path / "mapping.json"
+        first.export_map(str(mapping))
+
+        second = RedactionEngine()
+        second.import_map(str(mapping))
+
+        assert second.unredact(redacted) == original
+
+    def test_ldap_unfolding_does_not_change_indented_non_ldap_text(self):
+        original = (
+            "dn: CN=alice,DC=corp,DC=local\n"
+            "notes:\n"
+            " indented prose must remain on its own line\n"
+            "end"
+        )
+        engine = RedactionEngine()
+
+        assert engine.unredact(engine.redact(original)) == original
 
 
 # ---------------------------------------------------------------------------
@@ -463,7 +551,9 @@ class TestBatchMode:
 
         out_dir = str(tmp_path / "out")
         map_path = str(tmp_path / "map.json")
-        ret = main([str(f1), str(f2), "--output-dir", out_dir, "--export-map", map_path])
+        ret = main(
+            [str(f1), str(f2), "--output-dir", out_dir, "--export-map", map_path]
+        )
         assert ret == 0
 
         out1 = (tmp_path / "out" / "a.redacted.txt").read_text()
@@ -675,9 +765,7 @@ class TestMapFileErrors:
 class TestDryRunWithAllowlist:
     def test_dry_run_hides_allowlist_entries(self, monkeypatch, capsys):
         """--dry-run should not show allowlisted identity mappings."""
-        monkeypatch.setattr(
-            "sys.stdin", StringIO("10.4.12.50 and 10.4.12.1\n")
-        )
+        monkeypatch.setattr("sys.stdin", StringIO("10.4.12.50 and 10.4.12.1\n"))
         ret = main(["--dry-run", "--allow", "10.4.12.50"])
         assert ret == 0
         captured = capsys.readouterr()
@@ -723,9 +811,7 @@ class TestLLMChunking:
         for previous, current in zip(chunks, chunks[1:]):
             assert previous[-LLM_CHUNK_OVERLAP:] == current[:LLM_CHUNK_OVERLAP]
 
-    def test_llm_review_checks_tail_instead_of_truncating(
-        self, monkeypatch, capsys
-    ):
+    def test_llm_review_checks_tail_instead_of_truncating(self, monkeypatch, capsys):
         from decon.llm import MAX_LLM_CHARS, llm_review
 
         payloads = []
@@ -741,9 +827,7 @@ class TestLLMChunking:
                 return False
 
             def read(self):
-                return json.dumps({
-                    "message": {"content": self.content}
-                }).encode()
+                return json.dumps({"message": {"content": self.content}}).encode()
 
         def fake_urlopen(request, timeout):
             assert timeout == 300
@@ -1118,7 +1202,9 @@ class TestDomainUserSlash:
 
 class TestCLIFlagSecrets:
     def test_p_flag_quoted(self):
-        result = RedactionEngine().redact("nxc smb 10.0.0.0/24 -u fcastle -p 'Password1'")
+        result = RedactionEngine().redact(
+            "nxc smb 10.0.0.0/24 -u fcastle -p 'Password1'"
+        )
         assert "Password1" not in result
         assert "SECRET_" in result
 
@@ -1127,14 +1213,18 @@ class TestCLIFlagSecrets:
         assert "SuperSecret123" not in result
 
     def test_P_flag(self):
-        result = RedactionEngine().redact("hydra -l admin -P /usr/share/wordlists/rockyou.txt 10.1.1.1")
+        result = RedactionEngine().redact(
+            "hydra -l admin -P /usr/share/wordlists/rockyou.txt 10.1.1.1"
+        )
         # File paths to wordlists should NOT be treated as secrets
         # The -P flag is for password files, not passwords — but our rule matches it
         # This is acceptable since it redacts a file path that could contain target info
         assert "SECRET_" in result or "/usr/share" in result
 
     def test_hash_flag(self):
-        result = RedactionEngine().redact("evil-winrm -H aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0 -i 10.1.1.1")
+        result = RedactionEngine().redact(
+            "evil-winrm -H aad3b435b51404eeaad3b435b51404ee:31d6cfe0d16ae931b73c59d7e0c089c0 -i 10.1.1.1"
+        )
         # The hash should be caught by either -H flag or ntlm_hash rule
         assert "aad3b435" not in result
 
@@ -1189,7 +1279,9 @@ class TestDCC2Rule:
         assert "julio" not in result
 
     def test_dcc2_with_domain_prefix(self):
-        line = "INLANEFREIGHT.HTB/julio:$DCC2$10240#julio#c2139497f24725b345aa1e23352481f3"
+        line = (
+            "INLANEFREIGHT.HTB/julio:$DCC2$10240#julio#c2139497f24725b345aa1e23352481f3"
+        )
         result = RedactionEngine().redact(line)
         assert "julio" not in result
 
@@ -1238,12 +1330,16 @@ class TestMachineHexPassword:
 
 class TestWindowsSIDRule:
     def test_domain_sid(self):
-        result = RedactionEngine().redact("SID: S-1-5-21-3842939050-3880317879-2865463114-1001")
+        result = RedactionEngine().redact(
+            "SID: S-1-5-21-3842939050-3880317879-2865463114-1001"
+        )
         assert "SID_REDACTED_" in result
         assert "3842939050" not in result
 
     def test_sid_without_rid(self):
-        result = RedactionEngine().redact("Domain SID: S-1-5-21-3842939050-3880317879-2865463114")
+        result = RedactionEngine().redact(
+            "Domain SID: S-1-5-21-3842939050-3880317879-2865463114"
+        )
         assert "SID_REDACTED_" in result
 
     def test_sid_in_mimikatz_output(self):
@@ -1360,27 +1456,37 @@ class TestCLIFlagUsernames:
         assert "Hunter2" not in result
 
     def test_user_flag(self):
-        result = RedactionEngine().redact("evil-winrm --user admin -p Password1 -i 10.1.1.1")
+        result = RedactionEngine().redact(
+            "evil-winrm --user admin -p Password1 -i 10.1.1.1"
+        )
         assert "admin" not in result
 
 
 class TestSlashParamSecrets:
     def test_user_param(self):
-        result = RedactionEngine().redact("rubeus.exe asktgt /user:svc_sql /domain:corp.local")
+        result = RedactionEngine().redact(
+            "rubeus.exe asktgt /user:svc_sql /domain:corp.local"
+        )
         assert "svc_sql" not in result
         assert "corp.local" not in result
 
     def test_rc4_param(self):
-        result = RedactionEngine().redact("rubeus.exe /rc4:e52cac67419a9a224a3b108f3fa6cb6d")
+        result = RedactionEngine().redact(
+            "rubeus.exe /rc4:e52cac67419a9a224a3b108f3fa6cb6d"
+        )
         assert "e52cac67" not in result
         assert "SECRET_" in result
 
     def test_ntlm_param(self):
-        result = RedactionEngine().redact("mimikatz /ntlm:aabbccdd11223344aabbccdd11223344")
+        result = RedactionEngine().redact(
+            "mimikatz /ntlm:aabbccdd11223344aabbccdd11223344"
+        )
         assert "aabbccdd" not in result
 
     def test_aes256_param(self):
-        result = RedactionEngine().redact("rubeus /aes256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+        result = RedactionEngine().redact(
+            "rubeus /aes256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        )
         assert "01234567" not in result
 
     def test_password_param(self):
@@ -1394,12 +1500,16 @@ class TestSlashParamSecrets:
 
 class TestSMBUserPass:
     def test_basic(self):
-        result = RedactionEngine().redact("smbclient //10.1.1.1/share -U admin%P@ssword1")
+        result = RedactionEngine().redact(
+            "smbclient //10.1.1.1/share -U admin%P@ssword1"
+        )
         assert "admin" not in result or "SECRET_" in result
         assert "P@ssword1" not in result
 
     def test_domain_user(self):
-        result = RedactionEngine().redact("smbclient -U CORP/admin%Secret1 //10.1.1.1/share")
+        result = RedactionEngine().redact(
+            "smbclient -U CORP/admin%Secret1 //10.1.1.1/share"
+        )
         # DOMAIN/user part caught by domain_user_slash, password by smb_user_pass
         assert "Secret1" not in result
 
@@ -1439,11 +1549,15 @@ class TestDomainUserFalsePositives:
         assert "DOMAIN_USER_" not in result
 
     def test_microsoft_path(self):
-        result = RedactionEngine().redact("Microsoft.PowerShell.Core\\Registry::HKEY_LOCAL_MACHINE")
+        result = RedactionEngine().redact(
+            "Microsoft.PowerShell.Core\\Registry::HKEY_LOCAL_MACHINE"
+        )
         assert "DOMAIN_USER_" not in result
 
     def test_software_path(self):
-        result = RedactionEngine().redact("SOFTWARE\\Microsoft\\Windows\\CurrentVersion")
+        result = RedactionEngine().redact(
+            "SOFTWARE\\Microsoft\\Windows\\CurrentVersion"
+        )
         assert "DOMAIN_USER_" not in result
 
     def test_real_domain_user_still_caught(self):
@@ -1652,9 +1766,7 @@ class TestMajorRegressionFixes:
         assert result == "[HOST_REDACTED_0001]"
 
     def test_more_than_99_hostnames_remain_unique_and_reversible(self):
-        hosts = ["first.contoso.com"] + [
-            f"host{i}.corp.local" for i in range(1, 100)
-        ]
+        hosts = ["first.contoso.com"] + [f"host{i}.corp.local" for i in range(1, 100)]
         engine = RedactionEngine()
         engine.add_target_domains(["contoso.com"])
 
@@ -1671,7 +1783,7 @@ class TestMajorRegressionFixes:
 
     def test_dotted_short_and_spaced_credentials_are_redacted(self):
         text = (
-            'tool -u john.doe -p password.com --username ab --password xy '
+            "tool -u john.doe -p password.com --username ab --password xy "
             'token=abc secret="correct horse battery staple"'
         )
         result = RedactionEngine().redact(text)
@@ -1690,9 +1802,7 @@ class TestMajorRegressionFixes:
     # thing and split one account across two namespaces when it also appeared
     # as DOMAIN\user elsewhere.
     def test_smb_user_and_password_keep_separate_placeholders(self):
-        result = RedactionEngine().redact(
-            "smbclient -U admin%P@ssword1 //server/share"
-        )
+        result = RedactionEngine().redact("smbclient -U admin%P@ssword1 //server/share")
         assert "-U DOMAIN_USER_01%[SECRET_REDACTED_0001]" in result
         assert "admin" not in result
         assert "P@ssword1" not in result
@@ -1701,7 +1811,10 @@ class TestMajorRegressionFixes:
         "command,expected",
         [
             ("nxc smb 10.0.0.1 -u analyst.demo -p Hunter2!", "-u DOMAIN_USER_01"),
-            ("netexec ldap dc --username svc_sql --password x1", "--username DOMAIN_USER_01"),
+            (
+                "netexec ldap dc --username svc_sql --password x1",
+                "--username DOMAIN_USER_01",
+            ),
             ("smbclient -L srv -l jsmith", "-l DOMAIN_USER_01"),
         ],
     )
@@ -1749,10 +1862,14 @@ class TestMajorRegressionFixes:
 
     def test_stale_imported_counter_cannot_duplicate_placeholder(self, tmp_path):
         path = tmp_path / "map.json"
-        path.write_text(json.dumps({
-            "mapping": {"10.1.1.1": "[IPV4_REDACTED_0001]"},
-            "counters": {"ipv4": 0},
-        }))
+        path.write_text(
+            json.dumps(
+                {
+                    "mapping": {"10.1.1.1": "[IPV4_REDACTED_0001]"},
+                    "counters": {"ipv4": 0},
+                }
+            )
+        )
         engine = RedactionEngine()
         engine.import_map(str(path))
         assert engine.redact("10.2.2.2") == "[IPV4_REDACTED_0002]"
@@ -1776,9 +1893,7 @@ class TestMajorRegressionFixes:
 
     def test_equivalent_mac_spellings_share_a_placeholder(self):
         engine = RedactionEngine()
-        result = engine.redact(
-            "AA:BB:CC:DD:EE:FF aa-bb-cc-dd-ee-ff aabb.ccdd.eeff"
-        )
+        result = engine.redact("AA:BB:CC:DD:EE:FF aa-bb-cc-dd-ee-ff aabb.ccdd.eeff")
         assert result.split() == ["[MAC_REDACTED_0001]"] * 3
         assert engine.counters["mac"] == 1
 
@@ -1960,9 +2075,7 @@ class TestAuditLog:
         assert stat.S_IMODE(notes.stat().st_mode) == 0o755
         assert stat.S_IMODE(log.stat().st_mode) == 0o600
 
-    def test_existing_configured_log_is_tightened(
-        self, tmp_path, monkeypatch, capsys
-    ):
+    def test_existing_configured_log_is_tightened(self, tmp_path, monkeypatch, capsys):
         log = tmp_path / "audit.jsonl"
         log.write_text("")
         os.chmod(log, 0o644)
@@ -2029,9 +2142,7 @@ class TestSessionHygiene:
         monkeypatch.setattr("decon.config.DEFAULT_CONFIG_PATH", broken)
         assert main(["--list-sessions"]) == 0
 
-    def test_restore_survives_a_broken_config(
-        self, tmp_path, monkeypatch, capsys
-    ):
+    def test_restore_survives_a_broken_config(self, tmp_path, monkeypatch, capsys):
         monkeypatch.setattr("sys.stdin", StringIO("host dc01.corp.local\n"))
         assert main(["--session", "recovery"]) == 0
         redacted = capsys.readouterr().out

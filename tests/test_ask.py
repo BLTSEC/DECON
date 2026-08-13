@@ -7,6 +7,8 @@ a missing SDK produces a clear error rather than a traceback.
 
 from __future__ import annotations
 
+import os
+import stat
 from io import StringIO
 from types import SimpleNamespace
 
@@ -58,9 +60,7 @@ class TestAskFunction:
             ("host", "", "host must be a non-empty string"),
         ],
     )
-    def test_invalid_string_arguments_are_rejected(
-        self, argument, value, message
-    ):
+    def test_invalid_string_arguments_are_rejected(self, argument, value, message):
         kwargs = {"question": "q", "document": "doc", argument: value}
         with pytest.raises(AskError, match=message):
             ask(**kwargs)
@@ -93,8 +93,12 @@ class TestAskFunction:
 
     def test_missing_sdk_explains_how_to_install(self, monkeypatch):
         monkeypatch.setattr(
-            ask_mod, "_require", lambda *a, **k: (_ for _ in ()).throw(
-                AskError("provider requires the 'anthropic' package. Install it with: x")
+            ask_mod,
+            "_require",
+            lambda *a, **k: (_ for _ in ()).throw(
+                AskError(
+                    "provider requires the 'anthropic' package. Install it with: x"
+                )
             ),
         )
         with pytest.raises(AskError, match="anthropic"):
@@ -215,9 +219,7 @@ class TestAskCli:
         monkeypatch.setattr(
             "decon.cli.llm_review",
             lambda text, model, host, quiet: (
-                "FOUND: Project Nighthawk"
-                if "Project Nighthawk" in text
-                else "CLEAN"
+                "FOUND: Project Nighthawk" if "Project Nighthawk" in text else "CLEAN"
             ),
         )
 
@@ -259,14 +261,45 @@ class TestAskCli:
         assert "10.4.12.50" in out
         assert out.endswith("\n")
 
+    def test_answer_file_is_owner_only(
+        self, stub_provider, tmp_path, monkeypatch, capsys
+    ):
+        stub_provider("Pivot from [HOST_REDACTED_0001].")
+        monkeypatch.setattr("sys.stdin", StringIO(self.SOURCE))
+        destination = tmp_path / "answer.txt"
+        destination.write_text("old")
+        os.chmod(destination, 0o644)
+
+        assert (
+            main(
+                [
+                    "--ask",
+                    "What next?",
+                    "--output",
+                    str(destination),
+                ]
+            )
+            == 0
+        )
+        capsys.readouterr()
+
+        assert "dc01.corp.local" in destination.read_text()
+        assert stat.S_IMODE(destination.stat().st_mode) == 0o600
+
     def test_provider_error_exits_nonzero(self, monkeypatch, capsys):
+        audit_calls = []
+
         def boom(*a, **k):
             raise AskError("could not reach the Claude API")
 
         monkeypatch.setitem(ask_mod._PROVIDERS, "claude", boom)
+        monkeypatch.setattr(
+            "decon.cli._record_audit", lambda *args, **kwargs: audit_calls.append(args)
+        )
         monkeypatch.setattr("sys.stdin", StringIO(self.SOURCE))
         assert main(["--ask", "q"]) == 1
         assert "could not reach" in capsys.readouterr().err
+        assert len(audit_calls) == 1
 
     def test_empty_prompt_is_rejected(self, capsys):
         assert main(["--ask", "  "]) == 1
@@ -277,9 +310,7 @@ class TestAskCli:
         assert main(flag) == 1
         assert "require --ask" in capsys.readouterr().err
 
-    @pytest.mark.parametrize(
-        "flag", ["--dry-run", "--check", "--diff"]
-    )
+    @pytest.mark.parametrize("flag", ["--dry-run", "--check", "--diff"])
     def test_conflicting_modes_are_rejected(self, flag, capsys):
         assert main(["--ask", "q", flag]) == 1
         assert "cannot be used with" in capsys.readouterr().err
@@ -329,7 +360,8 @@ class TestProviderModelPairing:
         self, tmp_path, monkeypatch, capsys
     ):
         self._config(
-            tmp_path, monkeypatch,
+            tmp_path,
+            monkeypatch,
             '[ask]\nprovider = "claude"\nmodel = "claude-opus-5"\n',
         )
         seen = self._capture(monkeypatch, "ollama")
@@ -342,7 +374,8 @@ class TestProviderModelPairing:
         self, tmp_path, monkeypatch, capsys
     ):
         self._config(
-            tmp_path, monkeypatch,
+            tmp_path,
+            monkeypatch,
             '[ask]\nprovider = "claude"\nmodel = "claude-sonnet-5"\n',
         )
         seen = self._capture(monkeypatch, "claude")
@@ -353,7 +386,8 @@ class TestProviderModelPairing:
 
     def test_explicit_model_flag_always_wins(self, tmp_path, monkeypatch, capsys):
         self._config(
-            tmp_path, monkeypatch,
+            tmp_path,
+            monkeypatch,
             '[ask]\nprovider = "claude"\nmodel = "claude-opus-5"\n',
         )
         seen = self._capture(monkeypatch, "ollama")
@@ -415,9 +449,7 @@ class TestPerProviderModels:
         'ollama = "qwen3.5:9b"\n'
     )
 
-    def test_each_provider_gets_its_own_model(
-        self, tmp_path, monkeypatch, capsys
-    ):
+    def test_each_provider_gets_its_own_model(self, tmp_path, monkeypatch, capsys):
         self._config(tmp_path, monkeypatch, self.BODY)
         seen = self._capture(monkeypatch, "ollama")
         monkeypatch.setattr("sys.stdin", StringIO("host dc01.corp.local\n"))

@@ -52,8 +52,7 @@ def _require(module: str, extra_hint: str):
         return __import__(module)
     except ImportError as e:  # pragma: no cover - exercised via monkeypatch
         raise AskError(
-            f"provider requires the {module!r} package. "
-            f"Install it with: {extra_hint}"
+            f"provider requires the {module!r} package. Install it with: {extra_hint}"
         ) from e
 
 

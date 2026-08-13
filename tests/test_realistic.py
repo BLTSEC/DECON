@@ -16,6 +16,7 @@ from decon.engine import RedactionEngine
 # Helper
 # ---------------------------------------------------------------------------
 
+
 def _engine() -> RedactionEngine:
     return RedactionEngine()
 
@@ -124,12 +125,26 @@ rDNS record for 10.1.10.11: WINTERFELL
 389/tcp  open   ldap Microsoft Windows Active Directory LDAP (Domain: sevenkingdoms.local0., Site: Default-First-Site-Name)
 """
         result = _engine().redact(text)
-        assert "Command: nmap -Pn -sT -sV -p 389,445,1433 [HOST_REDACTED_0001] [HOST_REDACTED_0002]" in result
-        assert "Nmap scan report for [HOST_REDACTED_0001] ([IPV4_REDACTED_0001])" in result
-        assert "Nmap scan report for [HOST_REDACTED_0002] ([IPV4_REDACTED_0002])" in result
-        assert "rDNS record for [IPV4_REDACTED_0001]: [HOST_SHORT_REDACTED_0001]" in result
-        assert "rDNS record for [IPV4_REDACTED_0002]: [HOST_SHORT_REDACTED_0002]" in result
-        assert "(Domain: [DOMAIN_REDACTED_0001]0., Site: Default-First-Site-Name)" in result
+        assert (
+            "Command: nmap -Pn -sT -sV -p 389,445,1433 [HOST_REDACTED_0001] [HOST_REDACTED_0002]"
+            in result
+        )
+        assert (
+            "Nmap scan report for [HOST_REDACTED_0001] ([IPV4_REDACTED_0001])" in result
+        )
+        assert (
+            "Nmap scan report for [HOST_REDACTED_0002] ([IPV4_REDACTED_0002])" in result
+        )
+        assert (
+            "rDNS record for [IPV4_REDACTED_0001]: [HOST_SHORT_REDACTED_0001]" in result
+        )
+        assert (
+            "rDNS record for [IPV4_REDACTED_0002]: [HOST_SHORT_REDACTED_0002]" in result
+        )
+        assert (
+            "(Domain: [DOMAIN_REDACTED_0001]0., Site: Default-First-Site-Name)"
+            in result
+        )
 
 
 class TestNetexecOutput:
@@ -313,7 +328,9 @@ class TestBloodHoundOutput:
 
     def test_emails_redacted(self):
         result = _engine().redact(self.BLOODHOUND_USERS)
-        _assert_clean(result, "jdoe@acme.corp", "jsmith@acme.corp", "svc_backup@acme.corp")
+        _assert_clean(
+            result, "jdoe@acme.corp", "jsmith@acme.corp", "svc_backup@acme.corp"
+        )
 
 
 class TestSSHSession:
@@ -480,8 +497,9 @@ class TestPlaceholderCollision:
         engine.redact("Host 192.168.1.1 is down")
         ip_placeholder = engine.mapping["192.168.1.1"]
         # The placeholder itself must not create a new mapping entry.
-        assert ip_placeholder not in engine.mapping, \
+        assert ip_placeholder not in engine.mapping, (
             f"Placeholder {ip_placeholder!r} was re-mapped"
+        )
 
     def test_double_pass_no_cascade(self):
         """Redacting already-redacted output must not re-map placeholders.
@@ -495,8 +513,9 @@ class TestPlaceholderCollision:
         # Second pass on already-redacted output — must be idempotent
         r2 = engine.redact(r1)
         assert r2 == r1, f"Double-pass changed output: {r1!r} → {r2!r}"
-        assert "[IPV4_REDACTED_0001]" not in engine.mapping, \
+        assert "[IPV4_REDACTED_0001]" not in engine.mapping, (
             "Placeholder was re-mapped as a new value"
+        )
 
     def test_double_pass_many_ips(self):
         """Multiple IPs survive a double pass without cascading."""
@@ -516,8 +535,9 @@ class TestPlaceholderCollision:
             _assert_clean(result, ip)
         # No placeholder should appear as a mapping key
         for val in engine.mapping.values():
-            assert val not in engine.mapping, \
+            assert val not in engine.mapping, (
                 f"Placeholder {val!r} was re-mapped (cascade)"
+            )
 
     def test_cidr_placeholder_not_rematched_as_ip(self):
         """CIDR placeholder (10.0.0.N/24) should not have its IP part re-matched."""
@@ -581,7 +601,7 @@ class TestOverlappingRules:
     def test_multiple_secrets_same_line(self):
         """Multiple context secrets on the same line."""
         engine = _engine()
-        result = engine.redact('api_key=abc123secret token=xyz789token')
+        result = engine.redact("api_key=abc123secret token=xyz789token")
         _assert_clean(result, "abc123secret", "xyz789token")
         assert "api_key=" in result
         assert "token=" in result
@@ -589,7 +609,9 @@ class TestOverlappingRules:
     def test_hostname_and_ip_same_host(self):
         """Same host referenced by hostname and IP."""
         engine = _engine()
-        result = engine.redact("dc01.corp.acme.com (10.10.14.5) is the domain controller")
+        result = engine.redact(
+            "dc01.corp.acme.com (10.10.14.5) is the domain controller"
+        )
         _assert_clean(result, "dc01.corp.acme.com", "10.10.14.5")
 
     def test_ssn_vs_phone_no_confusion(self):
@@ -688,9 +710,7 @@ class TestMACEdgeCases:
 
     def test_multiple_macs(self):
         engine = _engine()
-        result = engine.redact(
-            "src aa:bb:cc:dd:ee:ff dst 11:22:33:44:55:66"
-        )
+        result = engine.redact("src aa:bb:cc:dd:ee:ff dst 11:22:33:44:55:66")
         _assert_clean(result, "aa:bb:cc:dd:ee:ff", "11:22:33:44:55:66")
         # Different MACs get different placeholders
         assert "[MAC_REDACTED_0001]" in result
@@ -818,9 +838,7 @@ class TestContextSecretEdgeCases:
 
     def test_multiple_secrets_different_keys(self):
         engine = _engine()
-        result = engine.redact(
-            'api_key=secret1234 password=other5678'
-        )
+        result = engine.redact("api_key=secret1234 password=other5678")
         _assert_clean(result, "secret1234", "other5678")
 
 
@@ -885,26 +903,22 @@ class TestCrossCallConsistency:
     def test_cross_file_with_export_import(self):
         """Simulate sanitizing multiple engagement files."""
         engine1 = _engine()
-        engine1.redact(
-            "Scan 10.10.14.5 found admin@corp.com open port 22"
-        )
+        engine1.redact("Scan 10.10.14.5 found admin@corp.com open port 22")
 
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False
-        ) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             path = f.name
         try:
             engine1.export_map(path)
 
             engine2 = _engine()
             engine2.import_map(path)
-            engine2.redact(
-                "SSH to 10.10.14.5 as admin@corp.com"
-            )
+            engine2.redact("SSH to 10.10.14.5 as admin@corp.com")
 
             # Same placeholders in both outputs
             assert engine1.mapping["10.10.14.5"] == engine2.mapping["10.10.14.5"]
-            assert engine1.mapping["admin@corp.com"] == engine2.mapping["admin@corp.com"]
+            assert (
+                engine1.mapping["admin@corp.com"] == engine2.mapping["admin@corp.com"]
+            )
         finally:
             os.unlink(path)
 
@@ -913,9 +927,7 @@ class TestCrossCallConsistency:
         engine1 = _engine()
         engine1.redact("10.10.14.5 and 10.10.14.10")  # counters: ipv4=2
 
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False
-        ) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
             path = f.name
         try:
             engine1.export_map(path)
@@ -944,8 +956,9 @@ password=Secret123! api_key=AnotherKey1
 """
         engine.redact(text)
         values = list(engine.mapping.values())
-        assert len(values) == len(set(values)), \
+        assert len(values) == len(set(values)), (
             f"Duplicate placeholders found: {values}"
+        )
 
     def test_large_scale_no_collision(self):
         """50 unique IPs should produce 50 unique placeholders."""
@@ -1069,7 +1082,10 @@ fe80::a00:27ff:fe8e:8aa8%eth0 link-local
         result = _engine().redact(self.DENSE_LOG)
         _assert_clean(
             result,
-            "10.10.14.5", "10.10.14.10", "10.10.14.20", "10.10.14.1",
+            "10.10.14.5",
+            "10.10.14.10",
+            "10.10.14.20",
+            "10.10.14.1",
         )
 
     def test_no_emails_leaked(self):
@@ -1080,14 +1096,18 @@ fe80::a00:27ff:fe8e:8aa8%eth0 link-local
         result = _engine().redact(self.DENSE_LOG)
         _assert_clean(
             result,
-            "dc01.corp.acme.com", "web01.corp.acme.com", "db01.internal",
+            "dc01.corp.acme.com",
+            "web01.corp.acme.com",
+            "db01.internal",
         )
 
     def test_no_macs_leaked(self):
         result = _engine().redact(self.DENSE_LOG)
         _assert_clean(
             result,
-            "DE:AD:BE:EF:CA:FE", "AA:BB:CC:11:22:33", "11:22:33:44:55:66",
+            "DE:AD:BE:EF:CA:FE",
+            "AA:BB:CC:11:22:33",
+            "11:22:33:44:55:66",
         )
 
     def test_no_secrets_leaked(self):
@@ -1156,6 +1176,7 @@ fe80::a00:27ff:fe8e:8aa8%eth0 link-local
 # IPv6 compressed forms
 # =============================================================================
 
+
 class TestIPv6Compressed:
     """IPv6 addresses with :: compression — these were previously missed."""
 
@@ -1202,6 +1223,7 @@ class TestIPv6Compressed:
 # =============================================================================
 # URL redaction
 # =============================================================================
+
 
 class TestURLRedaction:
     """URLs should be captured as whole units."""

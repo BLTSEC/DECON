@@ -32,6 +32,7 @@ def write_entry(
     substitutions: list[tuple[str, str, str]],
     *,
     mode: str,
+    status: str = "emitted",
     sources: list[str] | None = None,
     path: str | None = None,
     quiet: bool = False,
@@ -47,6 +48,7 @@ def write_entry(
     entry = {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "mode": mode,
+        "status": status,
         "sources": sources or ["-"],
         "substitutions": [
             {"category": category, "original": original, "placeholder": placeholder}

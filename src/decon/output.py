@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
 
 _CLIPBOARD_WRITE_COMMANDS = [
     ["pbcopy"],
@@ -26,10 +29,45 @@ def write_stdout(text: str) -> None:
     sys.stdout.flush()
 
 
-def write_file(text: str, path: str, quiet: bool = False) -> None:
-    """Write redacted text to a file."""
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(text)
+def write_file(
+    text: str,
+    path: str,
+    quiet: bool = False,
+    *,
+    sensitive: bool = False,
+) -> None:
+    """Write text to a file, protecting restored sensitive material.
+
+    Sensitive output is written atomically and forced to owner-only mode even
+    when replacing an existing permissive file.
+    """
+    if sensitive:
+        destination = Path(path)
+        fd, temporary_path = tempfile.mkstemp(
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+        )
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temporary_path, destination)
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                os.unlink(temporary_path)
+            except FileNotFoundError:
+                pass
+            raise
+    else:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
     if not quiet:
         print(f"Written to {path}", file=sys.stderr)
 

@@ -22,10 +22,8 @@ class TestLoadConfig:
         assert config == {}
 
     def test_valid_toml(self):
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".toml", delete=False
-        ) as f:
-            f.write('[rules]\nipv4 = false\n\n[llm]\nenabled = true\n')
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False) as f:
+            f.write("[rules]\nipv4 = false\n\n[llm]\nenabled = true\n")
             path = f.name
         try:
             config = load_config(Path(path))
@@ -41,9 +39,7 @@ class TestLoadConfig:
         assert os.stat(path).st_mode & 0o777 == 0o600
 
     def test_invalid_toml_raises_config_error(self):
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".toml", delete=False
-        ) as f:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".toml", delete=False) as f:
             f.write("[rules\nipv4 = true\n")
             path = f.name
         try:
@@ -128,9 +124,7 @@ class TestApplyConfig:
     def test_default_profile_applies_custom_values_extra(self):
         config = {
             "default_profile": "client-share",
-            "profiles": {
-                "client-share": {"custom_values_extra": ["Nighthawk"]}
-            },
+            "profiles": {"client-share": {"custom_values_extra": ["Nighthawk"]}},
         }
         engine = RedactionEngine()
         apply_config_to_engine(engine, config)
@@ -192,9 +186,7 @@ class TestApplyConfig:
     def test_custom_pattern_replacement_must_vary(self):
         config = {
             "custom": {
-                "patterns": [
-                    {"pattern": r"secret", "replacement": "[CUSTOM_REDACTED]"}
-                ]
+                "patterns": [{"pattern": r"secret", "replacement": "[CUSTOM_REDACTED]"}]
             }
         }
         with pytest.raises(ConfigError, match="Invalid replacement"):

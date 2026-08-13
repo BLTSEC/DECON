@@ -251,6 +251,13 @@ def _cidr_apply(
             return placeholder
 
         _ip, mask = value.rsplit("/", 1)
+        # The mask is preserved outside the logical CIDR identity. Reserve an
+        # existing index across every mask, not only an identical rendered
+        # placeholder such as ...0001]/24 versus ...0001]/16.
+        for existing in tuple(placeholder_values):
+            match = re.fullmatch(r"\[CIDR_REDACTED_(\d+)\](?:/\d{1,3})?", existing)
+            if match:
+                placeholder_values.add(f"[CIDR_REDACTED_{match.group(1)}]/{mask}")
         placeholder = _allocate_placeholder(
             rule.category,
             f"[CIDR_REDACTED_{{n:04d}}]/{mask}",
@@ -283,28 +290,42 @@ def _domain_context_apply(
         normalized, suffix = _split_domain_context_value(value)
         if _looks_like_fqdn(normalized):
             placeholder = _assign_domain_placeholder(
-                value=value,
+                # Only the normalized portion is replaced. The suffix remains
+                # in the document and must not also be stored in the reverse map.
+                value=normalized,
                 mapping=mapping,
                 counters=counters,
                 placeholder_values=placeholder_values,
-                applied=applied,
+                applied=None,
                 mapping_key=normalized.casefold(),
             )
+            category = "domain"
         else:
             placeholder = _assign_placeholder(
                 category=rule.category,
                 template=rule.placeholder_template,
-                value=value,
+                value=normalized,
                 mapping=mapping,
                 counters=counters,
                 placeholder_values=placeholder_values,
-                applied=applied,
-                mapping_key=value,
+                applied=None,
+                mapping_key=normalized,
             )
+            category = rule.category
+        # Scanner banners sometimes append noise (for example local0.) and the
+        # regex also captures ordinary punctuation. Register the complete
+        # rendered token so strict unredaction never has to replace a valid
+        # placeholder prefix inside a longer string.
+        rendered = placeholder + suffix
+        if suffix:
+            mapping.setdefault(value, rendered)
+            placeholder_values.add(rendered)
+        if applied is not None:
+            applied.append((category, value, rendered))
         full = match.group(0)
         start = full[: match.start(2) - match.start(0)]
         end = full[match.end(2) - match.start(0) :]
-        return start + placeholder + suffix + end
+        return start + rendered + end
 
     return rule.pattern.sub(_replace, text)
 
@@ -404,9 +425,7 @@ def _smb_user_pass_apply(
 # Convenience factories for apply_fn — avoids repeating the group number.
 def _apply_group(group: int) -> ApplyFn:
     """Return an apply_fn that replaces a specific capture group."""
-    return lambda rule, text, m, c, a: _group_replace_apply(
-        rule, text, m, c, group, a
-    )
+    return lambda rule, text, m, c, a: _group_replace_apply(rule, text, m, c, group, a)
 
 
 def _cli_flag_apply(
@@ -431,9 +450,13 @@ def _cli_flag_apply(
         # Skip file paths, template placeholders, and other non-secret values
         if _CLI_FLAG_SKIP_RE.match(value):
             return match.group(0)
-        if flag == "-U" and "%" in value and all(
-            part in placeholder_values or _is_typed_placeholder(part)
-            for part in value.split("%", 1)
+        if (
+            flag == "-U"
+            and "%" in value
+            and all(
+                part in placeholder_values or _is_typed_placeholder(part)
+                for part in value.split("%", 1)
+            )
         ):
             return match.group(0)
         if (
@@ -559,11 +582,8 @@ def _is_nmap_boilerplate_url(text: str, match_start: int, value: str) -> bool:
         line_end = len(text)
     line = text[line_start:line_end]
 
-    return (
-        line.startswith("Starting Nmap ")
-        or line.startswith(
-            "Service detection performed. Please report any incorrect results "
-        )
+    return line.startswith("Starting Nmap ") or line.startswith(
+        "Service detection performed. Please report any incorrect results "
     )
 
 
@@ -572,9 +592,13 @@ def _is_nmap_boilerplate_url(text: str, match_start: int, value: str) -> bool:
 # ---------------------------------------------------------------------------
 
 # IPs that are never sensitive — loopback, unspecified, link-local, documentation.
-_SKIP_IPV4 = frozenset({
-    "127.0.0.1", "0.0.0.0", "255.255.255.255",
-})
+_SKIP_IPV4 = frozenset(
+    {
+        "127.0.0.1",
+        "0.0.0.0",
+        "255.255.255.255",
+    }
+)
 
 # Prefixes that are never target IPs (loopback range, link-local, documentation)
 _SKIP_IPV4_PREFIXES = ("127.", "169.254.", "192.0.2.", "198.51.100.", "203.0.113.")
@@ -622,40 +646,46 @@ def _luhn_check(value: str) -> bool:
     return checksum % 10 == 0
 
 
-# Public code/tool hosting domains — URLs to these are references to public
-# resources (tools, wordlists, docs), not target infrastructure.
-_PUBLIC_URL_DOMAINS = frozenset({
-    "github.com", "raw.githubusercontent.com", "gist.github.com",
-    "gitlab.com", "bitbucket.org",
-    "exploit-db.com", "cvedetails.com",
-    "attack.mitre.org",
-})
-
-
-def _valid_url(value: str) -> bool:
-    """Skip URLs pointing to well-known public tool/resource domains."""
-    stripped = value.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0].lower()
-    return stripped not in _PUBLIC_URL_DOMAINS
-
-
 # Windows built-in identities and registry paths — not real credentials.
-_SKIP_DOMAIN_PREFIXES = frozenset({
-    "NT AUTHORITY", "NT SERVICE", "IIS APPPOOL", "BUILTIN",
-    "AUTHORITY", "SERVICE",
-    "NT-AUTORITÄT", "AUTORITE NT",
-    "Font",
-})
-
-_SKIP_DOMAIN_PATTERNS = (
-    "HKLM", "HKCU", "HKEY_", "Registry", "Microsoft",
-    "SOFTWARE", "SYSTEM", "Classes", "CurrentVersion",
+_SKIP_DOMAIN_PREFIXES = frozenset(
+    {
+        "NT AUTHORITY",
+        "NT SERVICE",
+        "IIS APPPOOL",
+        "BUILTIN",
+        "AUTHORITY",
+        "SERVICE",
+        "NT-AUTORITÄT",
+        "AUTORITE NT",
+        "Font",
+    }
 )
 
-_SKIP_DOMAIN_USERS = frozenset({
-    "SYSTEM", "NETWORK SERVICE", "LOCAL SERVICE", "LOCALSERVICE",
-    "NETWORKSERVICE", "DefaultAccount", "WDAGUtilityAccount",
-    "IUSR", "DefaultAppPool",
-})
+_SKIP_DOMAIN_PATTERNS = (
+    "HKLM",
+    "HKCU",
+    "HKEY_",
+    "Registry",
+    "Microsoft",
+    "SOFTWARE",
+    "SYSTEM",
+    "Classes",
+    "CurrentVersion",
+)
+
+_SKIP_DOMAIN_USERS = frozenset(
+    {
+        "SYSTEM",
+        "NETWORK SERVICE",
+        "LOCAL SERVICE",
+        "LOCALSERVICE",
+        "NETWORKSERVICE",
+        "DefaultAccount",
+        "WDAGUtilityAccount",
+        "IUSR",
+        "DefaultAppPool",
+    }
+)
 
 
 def _valid_domain_user(value: str) -> bool:
@@ -664,7 +694,7 @@ def _valid_domain_user(value: str) -> bool:
     if sep == -1:
         return True
     domain = value[:sep]
-    user = value[sep + 1:].split(":")[0]
+    user = value[sep + 1 :].split(":")[0]
     if domain.upper() in {s.upper() for s in _SKIP_DOMAIN_PREFIXES}:
         return False
     if user.upper() in {s.upper() for s in _SKIP_DOMAIN_USERS}:
@@ -674,9 +704,7 @@ def _valid_domain_user(value: str) -> bool:
     return True
 
 
-_FQDN_LIKE = re.compile(
-    r"(?i)^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
-)
+_FQDN_LIKE = re.compile(r"(?i)^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$")
 _HOST_PLACEHOLDER = re.compile(
     r"(?:\[HOST_REDACTED_\d+\]|\[HOST_SHORT_REDACTED_\d+\]|"
     r"HOST_\d+(?:\.example\.internal)?)"
@@ -693,7 +721,7 @@ def _normalize_domain_context_value(value: str) -> str:
 def _split_domain_context_value(value: str) -> tuple[str, str]:
     """Return a normalized Domain: value plus any stripped suffix to preserve."""
     trimmed = value.rstrip(".,;:!?)]}")
-    trailing = value[len(trimmed):]
+    trailing = value[len(trimmed) :]
     trimmed_no_dot = trimmed.rstrip(".")
 
     match = re.fullmatch(
@@ -704,7 +732,11 @@ def _split_domain_context_value(value: str) -> tuple[str, str]:
     )
     if match:
         normalized = match.group(1)
-        suffix = trimmed_no_dot[len(normalized):] + trimmed[len(trimmed_no_dot):] + trailing
+        suffix = (
+            trimmed_no_dot[len(normalized) :]
+            + trimmed[len(trimmed_no_dot) :]
+            + trailing
+        )
         return normalized, suffix
 
     return _normalize_domain_context_value(value), trailing
@@ -825,13 +857,19 @@ def _ldap_dn_domain_apply(
                 mapping=mapping,
                 counters=counters,
                 placeholder_values=placeholder_values,
-                applied=applied,
+                applied=None,
                 mapping_key=fqdn_key,
             )
-        elif applied is not None:
-            applied.append((rule.category, dc_chain, placeholder))
+        # Keep the LDAP serialization reversible while sharing the underlying
+        # domain identity. A composite token restores to the original DC= chain;
+        # the inner domain token still restores to the canonical FQDN elsewhere.
+        rendered = "DC=" + placeholder
+        mapping.setdefault(dc_chain, rendered)
+        placeholder_values.add(rendered)
+        if applied is not None:
+            applied.append((rule.category, dc_chain, rendered))
 
-        return leading + placeholder
+        return leading + rendered
 
     return rule.pattern.sub(_replace, text)
 
@@ -883,9 +921,7 @@ _MAC = re.compile(
     r"(?![:\w])"
 )
 
-_EMAIL = re.compile(
-    r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
-)
+_EMAIL = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
 
 _PHONE = re.compile(
     r"(?<!\d)"
@@ -897,17 +933,11 @@ _PHONE = re.compile(
     r"(?!\d)"
 )
 
-_SSN = re.compile(
-    r"(?<!\d)\d{3}-\d{2}-\d{4}(?!\d)"
-)
+_SSN = re.compile(r"(?<!\d)\d{3}-\d{2}-\d{4}(?!\d)")
 
-_CC = re.compile(
-    r"(?<!\d)(?:\d[ -]?){12,18}\d(?!\d)"
-)
+_CC = re.compile(r"(?<!\d)(?:\d[ -]?){12,18}\d(?!\d)")
 
-_JWT = re.compile(
-    r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"
-)
+_JWT = re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")
 
 _AWS_KEY = re.compile(r"(?<![A-Z0-9])AKIA[0-9A-Z]{16}(?![A-Z0-9])")
 
@@ -965,24 +995,18 @@ _RDNS_SINGLE_LABEL = re.compile(
     r"(?=\s|$)"
 )
 
-_SMB_NETBIOS_NAME = re.compile(
-    r"(\(name:|CN=)([A-Z][A-Z0-9-]{1,14})(?=\)|,)"
-)
+_SMB_NETBIOS_NAME = re.compile(r"(\(name:|CN=)([A-Z][A-Z0-9-]{1,14})(?=\)|,)")
 
 # Matches LDAP DN domain suffix: DC=north,DC=sevenkingdoms,DC=local
 # Leading comma (group 1) is preserved; DC= chain (group 2) is replaced.
 # Requires 2+ DC= components so single DC=foo never fires as a false positive.
-_LDAP_DN_DOMAIN = re.compile(
-    r"(?i)(,?)(DC=[a-zA-Z0-9-]+(?:,DC=[a-zA-Z0-9-]+)+)"
-)
+_LDAP_DN_DOMAIN = re.compile(r"(?i)(,?)(DC=[a-zA-Z0-9-]+(?:,DC=[a-zA-Z0-9-]+)+)")
 
 # Matches LDAP sAMAccountName attribute value.
 # Handles both attribute output (sAMAccountName: value) and filter syntax (sAMAccountName=value).
 # Group 1 = attribute prefix; group 2 = value to redact.
 # Excludes ) from value to avoid consuming the closing paren in LDAP search filters.
-_LDAP_SAMACCOUNTNAME = re.compile(
-    r"(?i)(sAMAccountName[=:]\s*)([^\s\n)]+)"
-)
+_LDAP_SAMACCOUNTNAME = re.compile(r"(?i)(sAMAccountName[=:]\s*)([^\s\n)]+)")
 
 # BUG-10: Impacket GetNPUsers.py "[-] User <name> doesn't have..." and
 # netexec/CME "[*] Testing <name>" status lines.
@@ -994,40 +1018,30 @@ _IMPACKET_STATUS_USER = re.compile(
 # netexec password spray "[*] Trying: <password>" status lines.
 # Group 1 = prefix; group 2 = password value to redact (everything up to end-of-line
 # or the literal " on " domain suffix common in spray output).
-_NETEXEC_SPRAY_PASSWORD = re.compile(
-    r"(\[\*\] Trying:\s+)(\S+?)(?=\s+on\s|\s*\n|\s*$)"
-)
+_NETEXEC_SPRAY_PASSWORD = re.compile(r"(\[\*\] Trying:\s+)(\S+?)(?=\s+on\s|\s*\n|\s*$)")
 
 # BUG-12: CN=<lowercase-name> in LDAP DNs (user objects like CN=jon.snow).
 # Requires lowercase start to avoid matching well-known containers (CN=Users,
 # CN=Builtin, CN=Configuration, CN=Schema, etc. which start uppercase).
 # Group 1 = CN= prefix; group 2 = username to redact.
-_LDAP_CN_LOWERCASE_USER = re.compile(
-    r"(CN=)([a-z][a-z0-9._-]+)(?=[,\n])"
-)
+_LDAP_CN_LOWERCASE_USER = re.compile(r"(CN=)([a-z][a-z0-9._-]+)(?=[,\n])")
 
 # BUG-12: ldapsearch comment line "# <name>, <parent>, ..." format.
 # The first word on lines like "# jon.snow, Users, north.sevenkingdoms.local"
 # is the CN value and should be redacted.
 # Group 1 = "# " prefix; group 2 = name to redact.
-_LDAP_COMMENT_USER = re.compile(
-    r"(?m)^(#\s+)([a-z][a-z0-9._-]+)(?=,)"
-)
+_LDAP_COMMENT_USER = re.compile(r"(?m)^(#\s+)([a-z][a-z0-9._-]+)(?=,)")
 
 # LDAP description attribute — user display names and custom account notes.
 # Redacts all description: values; built-in descriptions (Administrator, Guest,
 # krbtgt) are acceptable collateral since their sAMAccountName is already hidden.
 # Group 1 = attribute prefix; group 2 = value to redact.
-_LDAP_DESCRIPTION = re.compile(
-    r"(?i)(description:\s+)([^\n]+)"
-)
+_LDAP_DESCRIPTION = re.compile(r"(?i)(description:\s+)([^\n]+)")
 
 # JSON "description": "value" format (BloodHound, AD-related JSON exports).
 # Matches person display names like "Jon Snow", "Samwell Tarly (Password : ...)"
 # Group 1 = JSON key+quote prefix; group 2 = value to redact (up to closing quote).
-_JSON_DESCRIPTION = re.compile(
-    r'("description":\s*")([^"]{2,}?)(")'
-)
+_JSON_DESCRIPTION = re.compile(r'("description":\s*")([^"]{2,}?)(")')
 
 # CN=<GroupOrUserName> in memberOf/DN context when nested directly under
 # CN=Users or CN=Builtin. Matches uppercase-start names like CN=Stark and
@@ -1049,9 +1063,7 @@ _NMAP_NTLM_FIELD = re.compile(
 # Name column.  By priority 49 the SPN rule (priority 24) has already replaced
 # SPNs with SPN_XX, so the Name column appears right after the placeholder.
 # Group 0 is the full match; capture group 1 = username.
-_KERBEROAST_TABLE_NAME = re.compile(
-    r"(?:SPN_\d+)\s{2,}([a-z][a-z0-9._-]+)(?=\s)"
-)
+_KERBEROAST_TABLE_NAME = re.compile(r"(?:SPN_\d+)\s{2,}([a-z][a-z0-9._-]+)(?=\s)")
 
 _CLI_FLAG_SECRET = re.compile(
     r"(?:^|\s)"
@@ -1069,10 +1081,10 @@ _CLI_USER_FLAGS = frozenset({"-u", "-l", "--user", "--login", "--username"})
 # Values that look like file paths, template placeholders, or flags — not secrets
 _CLI_FLAG_SKIP_RE = re.compile(
     r"^(?:"
-    r"[/<]"                       # starts with / (path) or < (template placeholder)
-    r"|None\b"                    # Python None in output
-    r"|-"                         # another flag
-    r"|%\{"                       # curl -w format string (%{http_code}, etc.)
+    r"[/<]"  # starts with / (path) or < (template placeholder)
+    r"|None\b"  # Python None in output
+    r"|-"  # another flag
+    r"|%\{"  # curl -w format string (%{http_code}, etc.)
     r")"
 )
 
@@ -1097,9 +1109,9 @@ _HOSTNAME_INTERNAL = re.compile(
 )
 
 _PRIVATE_KEY = re.compile(
-    r"-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----"
+    r"-----BEGIN (?P<key_type>(?:[A-Z]+ )?PRIVATE KEY)-----"
     r"[\s\S]*?"
-    r"-----END (?:[A-Z]+ )?PRIVATE KEY-----"
+    r"(?:-----END (?P=key_type)-----|\Z)"
 )
 
 _NTLM_HASH = re.compile(
@@ -1139,9 +1151,9 @@ _AD_DOMAIN_USER_BACKSLASH = re.compile(
 # "local/user" and the surviving password was left unredacted.
 _SPN = re.compile(
     r"(?<![\w./])"
-    r"[A-Za-z][A-Za-z0-9_-]{1,30}"                           # ServiceClass (e.g. CIFS, MSSQLSvc)
-    r"/[a-zA-Z0-9](?:[a-zA-Z0-9-]*\.)+[a-zA-Z]{2,}"         # /host.domain (FQDN required)
-    r"(?::[0-9]{1,5})?"                                       # optional :port
+    r"[A-Za-z][A-Za-z0-9_-]{1,30}"  # ServiceClass (e.g. CIFS, MSSQLSvc)
+    r"/[a-zA-Z0-9](?:[a-zA-Z0-9-]*\.)+[a-zA-Z]{2,}"  # /host.domain (FQDN required)
+    r"(?::[0-9]{1,5})?"  # optional :port
     r"(?![\w\/])"
 )
 
@@ -1155,48 +1167,38 @@ _AD_DOMAIN_USER_SLASH = re.compile(
     # domain/user pair "example.internal/login" and splits the URL in two.
     r"(?<![\w./])"
     r"(?:"
-    r"[A-Z][A-Z0-9]{3,14}"                              # CORP, INLANEFREIGHT (4+ uppercase)
-    r"|[a-zA-Z0-9](?:[a-zA-Z0-9-]*\.)+[a-zA-Z]{2,}"     # megacorp.local (FQDN)
+    r"[A-Z][A-Z0-9]{3,14}"  # CORP, INLANEFREIGHT (4+ uppercase)
+    r"|[a-zA-Z0-9](?:[a-zA-Z0-9-]*\.)+[a-zA-Z]{2,}"  # megacorp.local (FQDN)
     r")"
-    r"\/[a-z][a-zA-Z0-9._-]*"                            # /username (must start with lowercase)
-    r"(?::[^\s@]{4,})?(?:@[^\s]+)?"                       # optional :password@host
+    r"\/[a-z][a-zA-Z0-9._-]*"  # /username (must start with lowercase)
+    r"(?::[^\s@]{4,})?(?:@[^\s]+)?"  # optional :password@host
     r"(?![\w\/])"
 )
 
 _KERBEROS_HASH = re.compile(
     r"\$krb5(?:tgs|asrep)\$\d*\$"
-    r"(?:[^\s:]+(?:\$[^\s]+)+"   # TGS: $-delimited segments
-    r"|[^\s:]+:[^\s]+)"           # AS-REP: user@DOMAIN:hexhash
+    r"(?:[^\s:]+(?:\$[^\s]+)+"  # TGS: $-delimited segments
+    r"|[^\s:]+:[^\s]+)"  # AS-REP: user@DOMAIN:hexhash
 )
 
-_DCC2_HASH = re.compile(
-    r"(?:[^\s:]*\$)?DCC2\$\d+#[^#]+#[0-9a-fA-F]{32}"
-)
+_DCC2_HASH = re.compile(r"(?:[^\s:]*\$)?DCC2\$\d+#[^#]+#[0-9a-fA-F]{32}")
 
 _DPAPI_KEY = re.compile(
     r"(?:dpapi_machinekey|dpapi_userkey|NL\$KM)\s*:\s*(?:0x)?[0-9a-fA-F]{20,}"
 )
 
-_MACHINE_HEX_PASSWORD = re.compile(
-    r"plain_password_hex:[0-9a-fA-F]{32,}"
-)
+_MACHINE_HEX_PASSWORD = re.compile(r"plain_password_hex:[0-9a-fA-F]{32,}")
 
-_LINUX_HOME_PATH = re.compile(
-    r"/(?:home/)([a-zA-Z0-9._-]+)"
-)
+_LINUX_HOME_PATH = re.compile(r"/(?:home/)([a-zA-Z0-9._-]+)")
 
 _WINDOWS_USER_PATH = re.compile(
     r"(?i)C:\\\\?Users\\\\?"
     r"([a-zA-Z0-9._\s-]+?)(?=\\\\|\\|/|\s|$)"
 )
 
-_WINDOWS_SID = re.compile(
-    r"S-1-5-21-\d+-\d+-\d+(?:-\d+)?"
-)
+_WINDOWS_SID = re.compile(r"S-1-5-21-\d+-\d+-\d+(?:-\d+)?")
 
-_UNC_PATH = re.compile(
-    r"\\\\[a-zA-Z0-9._-]+(?:\\[a-zA-Z0-9._$-]+)+"
-)
+_UNC_PATH = re.compile(r"\\\\[a-zA-Z0-9._-]+(?:\\[a-zA-Z0-9._$-]+)+")
 
 _PORT_SPEC = re.compile(
     r"^(?:[TUSP]:)?\d{1,5}(?:-\d{1,5})?"
@@ -1387,7 +1389,6 @@ def build_default_rules() -> list[Rule]:
             priority=28,
             pattern=_URL,
             placeholder_template="URL_REDACTED_{n:02d}",
-            validator=_valid_url,
             apply_fn=_url_apply,
         ),
         Rule(

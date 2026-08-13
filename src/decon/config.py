@@ -171,9 +171,7 @@ def apply_config_to_engine(engine, config: dict, profile: str | None = None) -> 
                     prefix=f"profiles.{profile_name}",
                 )
             elif name != ALL_RULES and name not in known_rules:
-                raise ConfigError(
-                    f"Unknown rule in profile {profile_name}: {name}"
-                )
+                raise ConfigError(f"Unknown rule in profile {profile_name}: {name}")
             elif name != "custom_values_extra" and not isinstance(enabled, bool):
                 raise ConfigError(
                     f"Rule {name} in profile {profile_name} must be true or false"
@@ -290,9 +288,7 @@ def apply_config_to_engine(engine, config: dict, profile: str | None = None) -> 
     if "enabled" in llm and not isinstance(llm["enabled"], bool):
         raise ConfigError("llm.enabled must be true or false")
     for key in ("model", "host"):
-        if key in llm and (
-            not isinstance(llm[key], str) or not llm[key].strip()
-        ):
+        if key in llm and (not isinstance(llm[key], str) or not llm[key].strip()):
             raise ConfigError(f"llm.{key} must be a non-empty string")
 
     ask = _require_table(config, "ask")
@@ -300,9 +296,7 @@ def apply_config_to_engine(engine, config: dict, profile: str | None = None) -> 
     if "provider" in ask and ask["provider"] not in providers:
         raise ConfigError("ask.provider must be claude, openai, or ollama")
     for key in ("model", "host"):
-        if key in ask and (
-            not isinstance(ask[key], str) or not ask[key].strip()
-        ):
+        if key in ask and (not isinstance(ask[key], str) or not ask[key].strip()):
             raise ConfigError(f"ask.{key} must be a non-empty string")
     models = ask.get("models", {})
     if not isinstance(models, dict):
