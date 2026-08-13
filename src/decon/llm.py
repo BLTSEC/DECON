@@ -8,7 +8,7 @@ import sys
 import urllib.error
 import urllib.request
 
-from decon.patterns import get_placeholder_templates
+from decon.default_rules import get_placeholder_templates
 
 # Maximum characters to send in a single LLM request.
 MAX_LLM_CHARS = 12000

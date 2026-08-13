@@ -3,7 +3,7 @@
 import pytest
 
 from decon.engine import RedactionEngine
-from decon.patterns import (
+from decon.pattern_catalog import (
     _AD_DOMAIN_USER_SLASH,
     _AWS_KEY,
     _CIDR,
@@ -28,6 +28,8 @@ from decon.patterns import (
     _SMB_NETBIOS_NAME,
     _SPN,
     _SSN,
+)
+from decon.patterns import (
     _luhn_check,
     _valid_ipv4,
 )

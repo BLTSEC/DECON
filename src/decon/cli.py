@@ -9,7 +9,6 @@ import sys
 from pathlib import Path
 from typing import Callable
 
-from decon import __version__
 from decon.ask import (
     DEFAULT_MAX_TOKENS,
     DEFAULT_PROVIDER,
@@ -19,6 +18,13 @@ from decon.ask import (
     size_warning,
 )
 from decon.audit import write_entry
+from decon.cli_parser import build_parser
+from decon.cli_sessions import (
+    consume_session,
+    resolve_session,
+    run_session_admin,
+    save_session,
+)
 from decon.cli_validation import validate_args, validate_path_collisions
 from decon.config import (
     ConfigError,
@@ -39,9 +45,7 @@ from decon.output import (
     write_stdout,
 )
 from decon.state import (
-    DEFAULT_SESSION,
     StateError,
-    list_sessions,
     session_path,
 )
 
@@ -53,204 +57,6 @@ class RequiredLLMReviewError(RuntimeError):
 def _split_csv(value: str) -> list[str]:
     """Split a comma-separated CLI value list, dropping empty entries."""
     return [item.strip() for item in value.split(",") if item.strip()]
-
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="decon",
-        description="Sanitize operational data before sharing. "
-        "Consistent placeholders preserve analytical value.",
-    )
-    parser.add_argument(
-        "files",
-        nargs="*",
-        metavar="FILE",
-        help="Files to redact (default: stdin)",
-    )
-    parser.add_argument(
-        "--version",
-        action="version",
-        version=f"decon {__version__}",
-    )
-
-    # Input modes
-    input_group = parser.add_argument_group("input")
-    input_group.add_argument(
-        "--tmux",
-        action="store_true",
-        help="Capture active tmux pane scrollback",
-    )
-    input_group.add_argument(
-        "--clipboard-in",
-        action="store_true",
-        help="Read from system clipboard",
-    )
-
-    # Output modes
-    output_group = parser.add_argument_group("output")
-    output_group.add_argument(
-        "-c",
-        "--clipboard",
-        action="store_true",
-        help="Copy output to clipboard",
-    )
-    output_group.add_argument(
-        "-o",
-        "--output",
-        metavar="FILE",
-        help="Write output to file",
-    )
-    output_group.add_argument(
-        "--output-dir",
-        metavar="DIR",
-        help="Write redacted files to directory (one per input file)",
-    )
-
-    # Options
-    parser.add_argument(
-        "-p",
-        "--profile",
-        metavar="NAME",
-        help='Config profile (default: "standard")',
-    )
-    parser.add_argument(
-        "--enable",
-        metavar="RULES",
-        help="Enable rules (comma-separated)",
-    )
-    parser.add_argument(
-        "--disable",
-        metavar="RULES",
-        help="Disable rules (comma-separated)",
-    )
-    parser.add_argument(
-        "--allow",
-        metavar="VALUES",
-        help="Values to pass through unredacted (comma-separated)",
-    )
-    parser.add_argument(
-        "--redact",
-        metavar="VALUES",
-        help="Extra literal values to redact (comma-separated)",
-    )
-    parser.add_argument(
-        "--targets",
-        metavar="FILE",
-        help="Load engagement identifiers from a category:value file",
-    )
-    parser.add_argument(
-        "--llm",
-        action="store_true",
-        help="Local LLM safety check via Ollama",
-    )
-    parser.add_argument(
-        "--strict-llm",
-        action="store_true",
-        help="Require a successful clean LLM review before emitting output",
-    )
-    parser.add_argument(
-        "--ask",
-        metavar="PROMPT",
-        help="Ask an LLM about the redacted input, then restore real values",
-    )
-    parser.add_argument(
-        "--provider",
-        choices=["claude", "openai", "ollama"],
-        help="Provider for --ask (default: claude)",
-    )
-    parser.add_argument(
-        "--model",
-        metavar="NAME",
-        help="Model for --ask (default: provider's default)",
-    )
-    parser.add_argument(
-        "--export-map",
-        metavar="FILE",
-        help="Save mapping to JSON",
-    )
-    parser.add_argument(
-        "--import-map",
-        metavar="FILE",
-        help="Load prior mapping for cross-file consistency",
-    )
-    parser.add_argument(
-        "--unredact",
-        metavar="MAP_FILE",
-        help="Reverse redaction using a mapping file",
-    )
-    parser.add_argument(
-        "--session",
-        nargs="?",
-        const=DEFAULT_SESSION,
-        metavar="NAME",
-        help='Save the mapping as a named session (default: "last")',
-    )
-    parser.add_argument(
-        "--restore",
-        nargs="?",
-        const=DEFAULT_SESSION,
-        metavar="NAME",
-        help="Restore real values using a saved session",
-    )
-    parser.add_argument(
-        "--list-sessions",
-        action="store_true",
-        help="Show saved session names",
-    )
-    parser.add_argument(
-        "--forget",
-        metavar="NAME",
-        help="Delete a saved session and its reversible mapping",
-    )
-    parser.add_argument(
-        "--forget-all",
-        action="store_true",
-        help="Delete every saved session",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Show what would be redacted",
-    )
-    parser.add_argument(
-        "--check",
-        action="store_true",
-        help="Exit non-zero if redactions needed (for CI/pre-commit)",
-    )
-    parser.add_argument(
-        "--diff",
-        action="store_true",
-        help="Show unified diff of original vs redacted",
-    )
-    parser.add_argument(
-        "--list-rules",
-        action="store_true",
-        help="Show all rules and status",
-    )
-    parser.add_argument(
-        "--init-config",
-        action="store_true",
-        help="Create default config file",
-    )
-    parser.add_argument(
-        "--no-audit",
-        action="store_true",
-        help="Do not record this run in the audit log",
-    )
-    parser.add_argument(
-        "-q",
-        "--quiet",
-        action="store_true",
-        help="Suppress stderr messages",
-    )
-    parser.add_argument(
-        "-v",
-        "--verbose",
-        action="store_true",
-        help="Show redaction stats",
-    )
-
-    return parser
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -276,7 +82,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Session housekeeping needs no config, so a broken config file must not
     # stop you listing or deleting sessions.
-    status = _run_session_admin(args)
+    status = run_session_admin(args)
     if status is not None:
         return status
 
@@ -333,58 +139,6 @@ def main(argv: list[str] | None = None) -> int:
     except RequiredLLMReviewError as e:
         print(f"Error: strict LLM review blocked output ({e})", file=sys.stderr)
         return 1
-
-
-def _run_session_admin(args: argparse.Namespace) -> int | None:
-    """Handle --list-sessions and --forget. Returns None if neither applies."""
-    if args.forget:
-        try:
-            path = session_path(args.forget)
-        except StateError as e:
-            print(f"Error: {e}", file=sys.stderr)
-            return 1
-        if not path.exists():
-            print(
-                f"Error: no saved session named {args.forget!r}",
-                file=sys.stderr,
-            )
-            return 1
-        try:
-            path.unlink()
-        except OSError as e:
-            print(f"Error removing session {args.forget}: {e}", file=sys.stderr)
-            return 1
-        if not args.quiet:
-            print(f"Forgot session {args.forget!r}", file=sys.stderr)
-        return 0
-
-    if args.forget_all:
-        names = list_sessions()
-        if not names:
-            if not args.quiet:
-                print("No saved sessions.", file=sys.stderr)
-            return 0
-        removed = 0
-        for name in names:
-            try:
-                session_path(name).unlink()
-                removed += 1
-            except (OSError, StateError) as e:
-                print(f"Error removing session {name}: {e}", file=sys.stderr)
-                return 1
-        if not args.quiet:
-            print(f"Forgot {removed} session(s)", file=sys.stderr)
-        return 0
-
-    if args.list_sessions:
-        names = list_sessions()
-        if not names:
-            print("No saved sessions.", file=sys.stderr)
-        for name in names:
-            print(name)
-        return 0
-
-    return None
 
 
 def _load_reverse_config(args: argparse.Namespace) -> dict:
@@ -463,20 +217,8 @@ def _resolve_reverse_map(args: argparse.Namespace) -> str | None:
     if args.unredact:
         return args.unredact
 
-    try:
-        path = session_path(args.restore)
-    except StateError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return None
-    if not path.exists():
-        known = list_sessions()
-        hint = f" Known sessions: {', '.join(known)}" if known else ""
-        print(
-            f"Error: no saved session named {args.restore!r}.{hint}",
-            file=sys.stderr,
-        )
-        return None
-    return str(path)
+    path = resolve_session(args.restore)
+    return str(path) if path is not None else None
 
 
 def _run_reverse(
@@ -514,6 +256,12 @@ def _run_reverse(
         restored_applied,
         mode="restore" if args.unredact is None else "unredact",
     )
+    if args.consume and not consume_session(
+        Path(map_path),
+        name=args.restore,
+        quiet=args.quiet,
+    ):
+        return 1
     return 0
 
 
@@ -964,19 +712,7 @@ def _export_map(args: argparse.Namespace, engine: RedactionEngine) -> bool:
         if not args.quiet:
             print(f"Mapping exported to {args.export_map}", file=sys.stderr)
 
-    if args.session is not None:
-        try:
-            engine.export_map(str(session_path(args.session)))
-        except (OSError, StateError) as e:
-            print(f"Error saving session {args.session}: {e}", file=sys.stderr)
-            return False
-        if not args.quiet:
-            print(
-                f"Session {args.session!r} saved — "
-                f"restore with: decon --restore {args.session}",
-                file=sys.stderr,
-            )
-    return True
+    return save_session(args, engine)
 
 
 def _apply_rule_names(

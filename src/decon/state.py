@@ -7,19 +7,78 @@ an exported map.
 
 from __future__ import annotations
 
+import json
 import os
 import re
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 # A session name becomes a filename, so keep it to characters that cannot
 # traverse or escape the sessions directory.
 _SAFE_NAME = re.compile(r"[A-Za-z0-9._-]+")
+_TTL = re.compile(r"([1-9][0-9]*)([smhdw])", re.IGNORECASE)
+_TTL_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+_MAX_TTL_SECONDS = 10 * 365 * 86400
 
 DEFAULT_SESSION = "last"
 
 
 class StateError(ValueError):
     """Raised when the state directory or a session name is unusable."""
+
+
+def parse_session_ttl(value: str) -> timedelta:
+    """Parse a compact lifetime such as 30m, 24h, or 7d."""
+    match = _TTL.fullmatch(value.strip())
+    if not match:
+        raise StateError(
+            "session TTL must be a positive whole number followed by "
+            "s, m, h, d, or w (for example: 30m, 24h, 7d)"
+        )
+    seconds = int(match.group(1)) * _TTL_SECONDS[match.group(2).lower()]
+    if seconds > _MAX_TTL_SECONDS:
+        raise StateError("session TTL must not exceed 3650d")
+    return timedelta(seconds=seconds)
+
+
+def new_session_metadata(ttl: str | None = None) -> dict[str, str]:
+    """Build timestamp metadata for a saved session."""
+    created = datetime.now(UTC)
+    metadata = {"created_at": created.isoformat()}
+    if ttl:
+        metadata["expires_at"] = (created + parse_session_ttl(ttl)).isoformat()
+    return metadata
+
+
+def session_is_expired(path: Path, *, now: datetime | None = None) -> bool:
+    """Validate session metadata and report whether its TTL elapsed."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as e:
+        raise StateError(f"could not inspect session {path.stem!r}: {e}") from e
+    if not isinstance(data, dict):
+        raise StateError(f"invalid session map {path.stem!r}: root must be an object")
+    metadata = data.get("session")
+    if metadata is None:  # Sessions created before TTL support never expire.
+        return False
+    if not isinstance(metadata, dict) or set(metadata) - {"created_at", "expires_at"}:
+        raise StateError(f"invalid metadata in session {path.stem!r}")
+    try:
+        created = datetime.fromisoformat(metadata["created_at"])
+        expires_raw = metadata.get("expires_at")
+        expires = datetime.fromisoformat(expires_raw) if expires_raw else None
+    except (KeyError, TypeError, ValueError) as e:
+        raise StateError(f"invalid timestamps in session {path.stem!r}") from e
+    if created.tzinfo is None or (expires is not None and expires.tzinfo is None):
+        raise StateError(f"session {path.stem!r} timestamps require a timezone")
+    if expires is None:
+        return False
+    if expires <= created:
+        raise StateError(f"session {path.stem!r} expires_at must follow created_at")
+    current = now or datetime.now(UTC)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=UTC)
+    return current.astimezone(UTC) >= expires.astimezone(UTC)
 
 
 def state_dir() -> Path:

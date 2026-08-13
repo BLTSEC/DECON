@@ -9,11 +9,11 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from decon.default_rules import build_default_rules
 from decon.patterns import (
     Rule,
     _apply_group,
     _rdns_hostname_apply,
-    build_default_rules,
 )
 
 AppliedRedaction = tuple[str, str, str]
@@ -503,7 +503,12 @@ class RedactionEngine:
             priority=45,
         )
 
-    def export_map(self, path: str) -> None:
+    def export_map(
+        self,
+        path: str,
+        *,
+        session_metadata: dict[str, str] | None = None,
+    ) -> None:
         """Export the current mapping atomically with owner-only permissions."""
         destination = Path(path)
         fd, temporary_path = tempfile.mkstemp(
@@ -514,16 +519,15 @@ class RedactionEngine:
         try:
             os.fchmod(fd, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(
-                    {
-                        "version": 2,
-                        "mapping": self.mapping,
-                        "reverse_mapping": self.reverse_mapping,
-                        "counters": self.counters,
-                    },
-                    f,
-                    indent=2,
-                )
+                payload = {
+                    "version": 2,
+                    "mapping": self.mapping,
+                    "reverse_mapping": self.reverse_mapping,
+                    "counters": self.counters,
+                }
+                if session_metadata is not None:
+                    payload["session"] = session_metadata
+                json.dump(payload, f, indent=2)
                 f.write("\n")
                 f.flush()
                 os.fsync(f.fileno())

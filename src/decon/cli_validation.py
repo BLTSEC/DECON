@@ -6,7 +6,7 @@ import argparse
 import os
 from pathlib import Path
 
-from decon.state import StateError, session_path
+from decon.state import StateError, parse_session_ttl, session_path
 
 
 def _same_path(first: str | Path, second: str | Path) -> bool:
@@ -44,6 +44,42 @@ def _enabled_names(options: tuple[tuple[str, bool], ...]) -> list[str]:
     return [name for name, enabled in options if enabled]
 
 
+def _operation_options(args: argparse.Namespace) -> tuple[tuple[str, bool], ...]:
+    """Describe processing flags once for every compatibility check."""
+    return (
+        ("FILE", bool(args.files)),
+        ("--tmux", args.tmux),
+        ("--clipboard-in", args.clipboard_in),
+        ("--clipboard", args.clipboard),
+        ("--output", args.output is not None),
+        ("--output-dir", args.output_dir is not None),
+        ("--profile", args.profile is not None),
+        ("--enable", args.enable is not None),
+        ("--disable", args.disable is not None),
+        ("--allow", args.allow is not None),
+        ("--redact", args.redact is not None),
+        ("--targets", args.targets is not None),
+        ("--llm", args.llm),
+        ("--strict-llm", args.strict_llm),
+        ("--ask", args.ask is not None),
+        ("--provider", args.provider is not None),
+        ("--model", args.model is not None),
+        ("--export-map", args.export_map is not None),
+        ("--import-map", args.import_map is not None),
+        ("--unredact", args.unredact is not None),
+        ("--session", args.session is not None),
+        ("--session-ttl", args.session_ttl is not None),
+        ("--restore", args.restore is not None),
+        ("--consume", args.consume),
+        ("--dry-run", args.dry_run),
+        ("--check", args.check),
+        ("--diff", args.diff),
+        ("--list-rules", args.list_rules),
+        ("--no-audit", args.no_audit),
+        ("--verbose", args.verbose),
+    )
+
+
 def validate_args(args: argparse.Namespace) -> str | None:
     """Return an error message if parsed CLI arguments are invalid."""
     standalone_actions = _enabled_names(
@@ -57,38 +93,7 @@ def validate_args(args: argparse.Namespace) -> str | None:
     if len(standalone_actions) > 1:
         return f"{', '.join(standalone_actions)} are mutually exclusive"
     if standalone_actions:
-        conflicts = _enabled_names(
-            (
-                ("FILE", bool(args.files)),
-                ("--tmux", args.tmux),
-                ("--clipboard-in", args.clipboard_in),
-                ("--clipboard", args.clipboard),
-                ("--output", args.output is not None),
-                ("--output-dir", args.output_dir is not None),
-                ("--profile", args.profile is not None),
-                ("--enable", args.enable is not None),
-                ("--disable", args.disable is not None),
-                ("--allow", args.allow is not None),
-                ("--redact", args.redact is not None),
-                ("--targets", args.targets is not None),
-                ("--llm", args.llm),
-                ("--strict-llm", args.strict_llm),
-                ("--ask", args.ask is not None),
-                ("--provider", args.provider is not None),
-                ("--model", args.model is not None),
-                ("--export-map", args.export_map is not None),
-                ("--import-map", args.import_map is not None),
-                ("--unredact", args.unredact is not None),
-                ("--session", args.session is not None),
-                ("--restore", args.restore is not None),
-                ("--dry-run", args.dry_run),
-                ("--check", args.check),
-                ("--diff", args.diff),
-                ("--list-rules", args.list_rules),
-                ("--no-audit", args.no_audit),
-                ("--verbose", args.verbose),
-            )
-        )
+        conflicts = _enabled_names(_operation_options(args))
         if conflicts:
             return (
                 f"{standalone_actions[0]} is a standalone action and cannot be "
@@ -96,33 +101,9 @@ def validate_args(args: argparse.Namespace) -> str | None:
             )
 
     if args.list_rules:
+        allowed = {"--profile", "--enable", "--disable", "--list-rules"}
         conflicts = _enabled_names(
-            (
-                ("FILE", bool(args.files)),
-                ("--tmux", args.tmux),
-                ("--clipboard-in", args.clipboard_in),
-                ("--clipboard", args.clipboard),
-                ("--output", args.output is not None),
-                ("--output-dir", args.output_dir is not None),
-                ("--allow", args.allow is not None),
-                ("--redact", args.redact is not None),
-                ("--targets", args.targets is not None),
-                ("--llm", args.llm),
-                ("--strict-llm", args.strict_llm),
-                ("--ask", args.ask is not None),
-                ("--provider", args.provider is not None),
-                ("--model", args.model is not None),
-                ("--export-map", args.export_map is not None),
-                ("--import-map", args.import_map is not None),
-                ("--unredact", args.unredact is not None),
-                ("--session", args.session is not None),
-                ("--restore", args.restore is not None),
-                ("--dry-run", args.dry_run),
-                ("--check", args.check),
-                ("--diff", args.diff),
-                ("--no-audit", args.no_audit),
-                ("--verbose", args.verbose),
-            )
+            tuple(item for item in _operation_options(args) if item[0] not in allowed)
         )
         if conflicts:
             return (
@@ -163,6 +144,17 @@ def validate_args(args: argparse.Namespace) -> str | None:
 
     if args.session is not None and args.restore is not None:
         return "--session and --restore cannot be used together"
+
+    if args.session_ttl is not None:
+        if args.session is None:
+            return "--session-ttl requires --session"
+        try:
+            parse_session_ttl(args.session_ttl)
+        except StateError as e:
+            return str(e)
+
+    if args.consume and args.restore is None:
+        return "--consume requires --restore"
 
     for value in (args.session, args.restore):
         if value is None:
@@ -235,6 +227,7 @@ def validate_args(args: argparse.Namespace) -> str | None:
                 ("--import-map", args.import_map is not None),
                 ("--export-map", args.export_map is not None),
                 ("--session", args.session is not None),
+                ("--session-ttl", args.session_ttl is not None),
                 ("--list-rules", args.list_rules),
                 ("--verbose", args.verbose),
             )
