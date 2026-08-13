@@ -833,7 +833,8 @@ class TestLLMChunking:
             assert timeout == 300
             payload = json.loads(request.data.decode())
             payloads.append(payload)
-            prompt = payload["messages"][0]["content"]
+            assert payload["messages"][0]["role"] == "system"
+            prompt = payload["messages"][1]["content"]
             content = "FOUND: tail-secret" if "tail-secret" in prompt else "CLEAN"
             return FakeResponse(content)
 
@@ -842,7 +843,7 @@ class TestLLMChunking:
         response = llm_review(text)
 
         assert len(payloads) >= 3
-        assert "tail-secret" in payloads[-1]["messages"][0]["content"]
+        assert "tail-secret" in payloads[-1]["messages"][1]["content"]
         assert response == "FOUND: tail-secret"
         captured = capsys.readouterr()
         assert "LLM chunks" in captured.err
@@ -869,6 +870,30 @@ class TestLLMChunking:
 
         assert llm_review("ordinary text") is None
         assert "outside the CLEAN/FOUND protocol" in capsys.readouterr().err
+
+    def test_hallucinated_finding_is_not_treated_as_a_real_leak(
+        self, monkeypatch, capsys
+    ):
+        from decon.llm import llm_review
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return json.dumps(
+                    {"message": {"content": "FOUND: invented.example"}}
+                ).encode()
+
+        monkeypatch.setattr(
+            "urllib.request.urlopen", lambda request, timeout: FakeResponse()
+        )
+
+        assert llm_review("ordinary text") is None
+        assert "absent from input" in capsys.readouterr().err
 
 
 class TestLLMPostFilterNormalization:
