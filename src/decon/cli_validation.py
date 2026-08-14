@@ -63,6 +63,7 @@ def _operation_options(args: argparse.Namespace) -> tuple[tuple[str, bool], ...]
         ("--strict-llm", args.strict_llm),
         ("--ask", args.ask is not None),
         ("--ask-preview", args.ask_preview),
+        ("--confirm-ask", args.confirm_ask),
         ("--force-ask", args.force_ask),
         ("--provider", args.provider is not None),
         ("--model", args.model is not None),
@@ -193,6 +194,10 @@ def validate_args(args: argparse.Namespace) -> str | None:
 
     if args.ask_preview and args.ask is None:
         return "--ask-preview requires --ask"
+    if args.confirm_ask and args.ask is None:
+        return "--confirm-ask requires --ask"
+    if args.confirm_ask and args.ask_preview:
+        return "--confirm-ask cannot be used with --ask-preview"
     if args.force_ask and args.ask is None:
         return "--force-ask requires --ask"
     if args.force_ask and args.ask_preview:

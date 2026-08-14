@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import hashlib
 import os
 import sys
 from pathlib import Path
@@ -16,8 +17,8 @@ from decon.ask import (
     DEFAULT_PROVIDER,
     DEFAULT_WARN_CHARS,
     AskError,
+    _ask_prepared,
     _build_prompt,
-    ask,
     size_warning,
 )
 from decon.audit import write_entry
@@ -383,19 +384,16 @@ def _run_redaction(
 
     if args.ask is not None:
         assert redacted_question is not None
+        prepared_prompt = _build_prompt(redacted_question, result)
         preview_status = _preflight_ask(
             args,
             engine,
             config,
-            redacted_question,
-            result,
+            prepared_prompt,
             preview=args.ask_preview,
         )
         if args.ask_preview:
-            if not _write_output(
-                args,
-                _build_prompt(redacted_question, result),
-            ):
+            if not _write_output(args, prepared_prompt):
                 return 1
             if not _export_map(args, engine):
                 return 1
@@ -403,6 +401,12 @@ def _run_redaction(
             return preview_status
         if preview_status:
             return preview_status
+        if args.confirm_ask and not _confirm_prepared_ask(
+            args,
+            config,
+            prepared_prompt,
+        ):
+            return 1
         # Provider calls can fail after transmission. Record the attempt before
         # crossing that trust boundary, without claiming a completed response.
         _record_audit(
@@ -417,8 +421,7 @@ def _run_redaction(
             args,
             engine,
             config,
-            redacted_question,
-            result,
+            prepared_prompt,
         )
     if args.check:
         return _run_check(args, applied, llm_findings, changed=changed)
@@ -440,11 +443,10 @@ def _run_ask(
     args: argparse.Namespace,
     engine: RedactionEngine,
     config: dict,
-    question: str,
-    redacted: str,
+    prepared_prompt: str,
 ) -> int:
     """Send redacted text to a provider and restore the reply."""
-    answer = _ask_provider(args, config, question, redacted)
+    answer = _ask_provider(args, config, prepared_prompt)
     if answer is None:
         return 1
 
@@ -575,8 +577,7 @@ def _preflight_ask(
     args: argparse.Namespace,
     engine: RedactionEngine,
     config: dict,
-    question: str,
-    redacted: str,
+    prompt: str,
     *,
     preview: bool,
 ) -> int:
@@ -584,7 +585,6 @@ def _preflight_ask(
     settings = _ask_settings(args, config)
     provider = str(settings["provider"])
     host = str(settings["host"])
-    prompt = _build_prompt(question, redacted)
     if not is_remote_provider(provider, host):
         return 0
 
@@ -639,16 +639,67 @@ def _preflight_ask(
     return 1
 
 
+def _read_ask_confirmation() -> str:
+    """Read confirmation from the controlling terminal, not redirected stdin."""
+    if sys.stdin.isatty():
+        return sys.stdin.readline()
+    terminal = "CONIN$" if os.name == "nt" else "/dev/tty"
+    with open(terminal, encoding="utf-8") as tty:
+        return tty.readline()
+
+
+def _confirm_prepared_ask(
+    args: argparse.Namespace,
+    config: dict,
+    prepared_prompt: str,
+) -> bool:
+    """Display and approve the exact user-prompt bytes sent by this process."""
+    settings = _ask_settings(args, config)
+    provider = str(settings["provider"])
+    model = settings["model"] if isinstance(settings["model"], str) else None
+    digest = hashlib.sha256(prepared_prompt.encode("utf-8")).hexdigest()
+
+    print("Prepared sanitized user prompt", file=sys.stderr)
+    print(f"Provider: {provider}", file=sys.stderr)
+    print(f"Model: {model or 'provider default'}", file=sys.stderr)
+    print(f"SHA-256: {digest}", file=sys.stderr)
+    print("--- BEGIN SANITIZED USER PROMPT ---", file=sys.stderr)
+    sys.stderr.write(prepared_prompt)
+    if not prepared_prompt.endswith("\n"):
+        sys.stderr.write("\n")
+    print("--- END SANITIZED USER PROMPT ---", file=sys.stderr)
+    print(
+        "Send this exact sanitized user prompt? [y/N]: ",
+        file=sys.stderr,
+        end="",
+    )
+    sys.stderr.flush()
+    try:
+        choice = _read_ask_confirmation().strip().casefold()
+    except OSError as error:
+        print(file=sys.stderr)
+        print(
+            "Error: --confirm-ask requires an interactive terminal "
+            f"({error}); use --ask-preview for a no-send dry run",
+            file=sys.stderr,
+        )
+        return False
+    if choice not in {"y", "yes"}:
+        print("Cancelled; provider was not contacted.", file=sys.stderr)
+        return False
+    print("Confirmed.", file=sys.stderr)
+    return True
+
+
 def _ask_provider(
     args: argparse.Namespace,
     config: dict,
-    question: str,
-    redacted: str,
+    prepared_prompt: str,
 ) -> str | None:
-    """Send redacted text to a provider. Returns None on failure.
+    """Send the prepared prompt to a provider. Returns None on failure.
 
-    Both the question and document have already been through the same engine;
-    neither original string is sent directly.
+    ``prepared_prompt`` is passed through unchanged so a confirmed digest and
+    display describe the exact user-prompt bytes given to the provider adapter.
     """
     settings = _ask_settings(args, config)
     provider = str(settings["provider"])
@@ -656,7 +707,7 @@ def _ask_provider(
 
     if not args.quiet:
         warning = size_warning(
-            f"{question}\n{redacted}",
+            prepared_prompt,
             int(settings["warn_chars"]),
         )
         if warning:
@@ -666,9 +717,8 @@ def _ask_provider(
             file=sys.stderr,
         )
     try:
-        return ask(
-            question,
-            redacted,
+        return _ask_prepared(
+            prepared_prompt,
             provider=provider,
             model=model if isinstance(model, str) else None,
             host=str(settings["host"]),

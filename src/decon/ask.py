@@ -460,15 +460,42 @@ def ask(
     The caller is responsible for redacting `document` first and for restoring
     the reply afterwards — this function never sees the unredacted text.
     """
-    if not isinstance(provider, str) or provider not in _PROVIDERS:
-        known = ", ".join(sorted(_PROVIDERS))
-        raise AskError(f"unknown provider {provider!r}. Choose one of: {known}")
     if not isinstance(question, str):
         raise AskError("the question must be a string")
     if not question.strip():
         raise AskError("the question must not be empty")
     if not isinstance(document, str):
         raise AskError("the document must be a string")
+
+    return _ask_prepared(
+        _build_prompt(question, document),
+        provider=provider,
+        model=model,
+        host=host,
+        max_tokens=max_tokens,
+        cli_mode=cli_mode,
+        cli_timeout_seconds=cli_timeout_seconds,
+    )
+
+
+def _ask_prepared(
+    prompt: str,
+    *,
+    provider: str = DEFAULT_PROVIDER,
+    model: str | None = None,
+    host: str = "http://localhost:11434",
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+    cli_mode: str = DEFAULT_CLI_MODE,
+    cli_timeout_seconds: int = DEFAULT_CLI_TIMEOUT_SECONDS,
+) -> str:
+    """Send an already-built user prompt without rebuilding or altering it."""
+    if not isinstance(provider, str) or provider not in _PROVIDERS:
+        known = ", ".join(sorted(_PROVIDERS))
+        raise AskError(f"unknown provider {provider!r}. Choose one of: {known}")
+    if not isinstance(prompt, str):
+        raise AskError("the prepared prompt must be a string")
+    if not prompt.strip():
+        raise AskError("the prepared prompt must not be empty")
     if model is not None and (not isinstance(model, str) or not model.strip()):
         raise AskError("the model must be a non-empty string")
     if not isinstance(host, str) or not host.strip():
@@ -490,7 +517,7 @@ def ask(
         raise AskError("cli_timeout_seconds must be a positive integer")
 
     return _PROVIDERS[provider](
-        _build_prompt(question, document),
+        prompt,
         model or DEFAULT_MODELS[provider],
         max_tokens,
         host=host,

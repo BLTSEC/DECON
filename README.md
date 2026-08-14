@@ -112,28 +112,24 @@ decon --strict-llm \
 review fails. Raw candidate context stays on loopback unless
 `llm.allow_remote = true` is explicitly configured.
 
-### 4. Preview, then ask
+### 4. Confirm and ask
 
 ```bash
-# No provider authentication or transmission
-
 decon --strict-llm \
   --targets ~/engagements/acme.targets \
   --provider codex \
   --ask "Prioritize the attack paths and recommend the next three checks." \
-  --ask-preview notes.md
-
-# After reviewing the exact sanitized prompt, remove --ask-preview
-
-decon --strict-llm \
-  --targets ~/engagements/acme.targets \
-  --provider codex \
-  --ask "Prioritize the attack paths and recommend the next three checks." \
-  notes.md
+  --confirm-ask notes.md
 ```
 
-DECON sends only the sanitized prompt and restores known placeholders in the
-answer. Use `--provider ollama` to keep both review and analysis local.
+DECON sanitizes once, displays the exact outbound user prompt and its SHA-256
+digest, then sends those same in-memory bytes only after confirmation. It
+restores known placeholders in the answer. Use `--provider ollama` to keep both
+review and analysis local.
+
+Use `--ask-preview` for a no-authentication, no-transmission dry run. Local LLM
+decisions are probabilistic, so its output is exact for that invocation but is
+not a guarantee that a separate run will produce identical bytes.
 
 | Provider | Boundary | Authentication |
 |---|---|---|
@@ -159,6 +155,8 @@ CLI providers use an isolated, non-persistent run by default. See
 | Add literal values | `decon --redact "codename,jsmith" notes.md` |
 | Preserve safe values | `decon --allow "scanme.nmap.org" scan.txt` |
 | Process a directory tree | `decon reports/**/*.txt --output-dir clean/` |
+| Confirm exact prompt, then send | `decon --ask "..." --confirm-ask notes.md` |
+| Preview without sending | `decon --ask "..." --ask-preview notes.md` |
 | CI/pre-commit check | `decon --check report.md` |
 | Inspect rules | `decon --list-rules` |
 | Validate setup | `decon --doctor` |
@@ -212,8 +210,8 @@ authoritative detector list.
 
 > [!CAUTION]
 > `--force-ask` bypasses an outbound credential block. Use it only after
-> reviewing `--ask-preview` and confirming a false positive. It cannot bypass a
-> failed `--strict-llm` review.
+> inspecting the prepared prompt and confirming a false positive. It cannot
+> bypass a failed `--strict-llm` review.
 
 Audit records are metadata-only by default. Maps, sessions, and full-detail
 audit logs may contain original values; never commit or share them.

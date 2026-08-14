@@ -110,7 +110,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--ask-preview",
         action="store_true",
-        help="Print the exact sanitized --ask prompt without transmitting it",
+        help="Print this run's sanitized --ask prompt without transmitting it",
+    )
+    parser.add_argument(
+        "--confirm-ask",
+        action="store_true",
+        help="Confirm the exact same-process prompt before transmission",
     )
     parser.add_argument(
         "--force-ask",

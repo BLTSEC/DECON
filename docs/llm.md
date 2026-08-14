@@ -84,12 +84,12 @@ reasons over stable placeholders.
 decon --ask "What are two attack paths here?" scan.txt
 decon --ask "Summarize the AD findings" --provider ollama notes.md
 
-# Preview the exact sanitized user prompt; no provider auth or transmission
+# Inspect without provider auth or transmission; exact for this invocation
 decon --ask "What are two attack paths here?" --ask-preview scan.txt
 
-# Local Ollama leak review, then a subscription-backed Codex request
+# Review once, confirm the exact bytes, then send through Codex
 decon --strict-llm --ask "What should I investigate next?" \
-  --provider codex notes.md
+  --provider codex --confirm-ask notes.md
 
 # The same workflow through a Claude subscription
 decon --strict-llm --ask "Summarize the attack paths" \
@@ -99,6 +99,17 @@ decon --strict-llm --ask "Summarize the attack paths" \
 Because placeholders are consistent, the model can still reason about topology
 and repetition — it just does so over `[HOST_REDACTED_0001]` instead of a real
 hostname, and its answer comes back with your hostnames restored.
+
+`--confirm-ask` is the recommended interactive remote-provider workflow. DECON
+sanitizes and runs local review once, displays the exact sanitized user prompt
+with its SHA-256 digest, and asks for confirmation. A `yes` sends that same
+in-memory string without rerunning Ollama. Confirmation is read from the
+controlling terminal, so redirected document input remains safe.
+
+`--ask-preview` remains useful for offline inspection, export, and automation.
+It never authenticates to or contacts the selected provider. Because local LLM
+classification and review are probabilistic, a preview is exact only for that
+invocation; starting a second DECON process may produce a different prompt.
 
 Choose a provider according to where it runs and how it authenticates:
 
@@ -171,10 +182,11 @@ intentionally noisy. It cannot bypass a failed `--strict-llm` run.
 
 > [!NOTE]
 > Redaction reduces exposure; it does not prove the text is safe to send. Review
-> `decon --ask-preview` output before pointing `--ask` at a remote provider for the
-> first time on a new engagement. Codex and Claude Code still send the sanitized
-> prompt to their remote services. Prefer `--provider ollama` when nothing may
-> leave the machine.
+> the in-process `--confirm-ask` prompt before remote transmission. Use
+> `--ask-preview` when no transmission is allowed, but do not treat one run as a
+> byte-for-byte approval of a later run. Codex and Claude Code still send the
+> sanitized prompt to their remote services. Prefer `--provider ollama` when
+> nothing may leave the machine.
 
 If a provider's safety classifiers decline the request — security tooling can
 trip them — DECON reports the refusal and its category rather than failing with
