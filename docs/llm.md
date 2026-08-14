@@ -45,7 +45,8 @@ Use `--strict-llm` when continuing without that safety check is unacceptable:
 
 ```bash
 decon --strict-llm -o scan.redacted.txt scan.txt
-decon --strict-llm --ask "What should I investigate next?" scan.txt
+decon --strict-llm --provider ollama \
+  --ask "What should I investigate next?" scan.txt
 ```
 
 Strict mode implies `--llm` and emits nothing unless classification and the
@@ -81,8 +82,8 @@ values in the answer. You write and read real infrastructure while the provider
 reasons over stable placeholders.
 
 ```bash
-decon --ask "What are two attack paths here?" scan.txt
-decon --ask "Summarize the AD findings" --provider ollama notes.md
+# Keep analysis local
+decon --provider ollama --ask "What are two attack paths here?" scan.txt
 
 # Inspect without provider auth or transmission; exact for this invocation
 decon --ask "What are two attack paths here?" --ask-preview scan.txt
@@ -93,7 +94,7 @@ decon --strict-llm --ask "What should I investigate next?" \
 
 # The same workflow through a Claude subscription
 decon --strict-llm --ask "Summarize the attack paths" \
-  --provider claude-code notes.md
+  --provider claude-code --confirm-ask notes.md
 ```
 
 Because placeholders are consistent, the model can still reason about topology
@@ -140,23 +141,9 @@ CLI is using first-party subscription authentication **before** sending the
 sanitized prompt. It will not silently fall back to metered API billing. Omit
 `--model` to use the CLI's selected default.
 
-```toml
-[ask]
-provider = "codex"           # claude | openai | ollama | codex | claude-code
-host = "http://localhost:11434"
-max_tokens = 16000
-warn_chars = 50000           # warn above this input size; 0 disables
-
-[ask.cli]
-mode = "isolated"            # isolated | standard
-timeout_seconds = 600
-
-[ask.models]                 # keyed by provider, so --provider is always safe
-claude = "claude-opus-5"
-ollama = "qwen3.5:9b"
-# codex = "gpt-5.6-sol"      # omitted: use the CLI default
-# claude-code = "sonnet"     # omitted: use the CLI default
-```
+Set provider defaults, model overrides, size warnings, and CLI isolation under
+`[ask]`; see [Configuration](configuration.md#direct-question-providers) for a
+complete example. Command-line flags override those defaults.
 
 CLI runs are isolated by default: DECON uses an empty owner-only temporary
 directory, disables session persistence, ignores Codex user rules/config, and

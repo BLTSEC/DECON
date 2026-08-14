@@ -8,7 +8,7 @@ Export a map when placeholders must remain stable across separate commands:
 decon --export-map engagement.decon-map.json scan-1.txt > clean-1.txt
 decon --import-map engagement.decon-map.json scan-2.txt > clean-2.txt
 
-# Update the same map with newly discovered values
+# Atomically update the same map with newly discovered values
 decon \
   --import-map engagement.decon-map.json \
   --export-map engagement.decon-map.json \
@@ -24,8 +24,8 @@ echo "Investigate [IPV4_REDACTED_0001]:443" \
 
 > [!CAUTION]
 > Maps and saved sessions contain the original sensitive values. Full-detail
-> audit logs do too. Maps and sessions are replaced atomically; every persisted file is
-> forced to mode `0600`, and DECON's state directory is owner-only. This
+> audit logs do too. Maps and sessions are replaced atomically; every persisted
+> file is forced to mode `0600`, and DECON's state directory is owner-only. This
 > repository ignores `map.json` and `*.decon-map.json`. Never commit, upload, or
 > share any of them.
 

@@ -24,14 +24,18 @@ def _same_path(first: str | Path, second: str | Path) -> bool:
 def validate_path_collisions(
     sources: list[tuple[str, str | Path]],
     destinations: list[tuple[str, str | Path]],
+    *,
+    allowed_source_destination_pairs: frozenset[tuple[str, str]] = frozenset(),
 ) -> str | None:
-    """Reject outputs that alias an input or another output."""
+    """Reject outputs that alias inputs or other outputs, except approved pairs."""
     for index, (label, path) in enumerate(destinations):
         for other_label, other_path in destinations[index + 1 :]:
             if _same_path(path, other_path):
                 return f"{label} and {other_label} resolve to the same path: {path}"
         for source_label, source_path in sources:
             if _same_path(path, source_path):
+                if (source_label, label) in allowed_source_destination_pairs:
+                    continue
                 return (
                     f"{label} would overwrite {source_label}: {path}; "
                     "choose a different destination"

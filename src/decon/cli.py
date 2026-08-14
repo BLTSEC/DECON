@@ -1191,7 +1191,11 @@ def _validate_paths(args: argparse.Namespace) -> str | None:
         ).items():
             destinations.append((f"batch output for {source!r}", path))
 
-    return validate_path_collisions(sources, destinations)
+    return validate_path_collisions(
+        sources,
+        destinations,
+        allowed_source_destination_pairs=frozenset({("--import-map", "--export-map")}),
+    )
 
 
 def _stats_for_applied(applied: list[tuple[str, str, str]]) -> dict[str, int]:

@@ -6,7 +6,10 @@ you want to call from a script:
     from decon import sanitize, desanitize, ask_safely
 
     clean, mapping = sanitize(raw_notes)
-    answer, mapping = ask_safely("What are two attack paths?")
+    answer, mapping = ask_safely(
+        f"What are two attack paths?\n\n{raw_notes}",
+        provider="ollama",
+    )
 
 `mapping` is placeholder -> original, which is the direction you need to
 restore text and the shape `desanitize()` expects. Note this is the inverse of
@@ -147,8 +150,9 @@ def ask_safely(
     Returns the restored response and the placeholder -> original map used.
     Only the engine's sanitized output leaves this process; the original prompt
     is never sent directly. As with every regex-based sanitizer, callers must
-    still account for identifiers no configured rule recognizes. Raises
-    AskError if the provider is unavailable or declines.
+    still account for identifiers no configured rule recognizes. The function
+    does not run local LLM review or request interactive confirmation before a
+    remote call. Raises AskError if the provider is unavailable or declines.
     """
     engine, config = _build_engine_with_config(
         targets_path,

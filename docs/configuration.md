@@ -13,10 +13,6 @@ A compact configuration example:
 ```toml
 default_profile = "standard"
 
-[rules]
-phone = false
-credit_card = false
-
 [custom]
 values = ["Project Nighthawk"]
 values_nocase = ["jsmith", "proddb"]
@@ -90,6 +86,9 @@ The built-in `pentest` profile enables standalone 32-hex NT-hash detection.
 This is opt-in because an isolated 32-hex token can also be an ordinary MD5
 checksum. PII rules remain enabled in every profile: without `--llm` they redact
 conservatively; with `--llm` their ambiguous matches are classified locally.
+Disabling a PII rule removes it from both paths, so do not disable `phone`,
+`credit_card`, or `ssn` merely to suppress false positives; use local LLM review
+or a narrow allowlist instead.
 
 `llm.allow_remote` defaults to false because PII candidate context is not yet
 redacted. Set it only when a non-loopback Ollama endpoint is inside the trust
@@ -129,6 +128,10 @@ stays in its read-only sandbox; Claude Code uses safe mode with tools disabled.
 That can add project files, instructions, hooks, or tools outside DECON's
 redaction boundary, so enable it only for a directory and configuration you
 trust.
+
+For remote providers, pair `--strict-llm` with `--confirm-ask` so DECON shows
+and sends the same in-memory sanitized prompt. See
+[LLM workflows](llm.md#asking-an-llm-directly).
 
 ## Typed engagement identifiers
 

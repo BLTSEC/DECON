@@ -30,6 +30,9 @@ credentials.json
 map.json
 *.decon-map.json
 
+# Engagement target files contain original client identifiers
+*.targets
+
 # So do saved sessions and the audit log, if ever pointed inside a repo
 audit.jsonl
 *.audit.jsonl

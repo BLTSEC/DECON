@@ -9,7 +9,7 @@ a hook definition, so guarding a notes vault is a few lines:
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/BLTSEC/DECON
-    rev: v0.9.1
+    rev: v0.9.2
     hooks:
       - id: decon
 ```
@@ -52,8 +52,8 @@ capture -> sanitize -> share workflow.
 # Sanitize the most recent capture to the clipboard
 decon -c "$(cap last)"
 
-# Include local LLM review
-decon -c --llm "$(cap last)"
+# Require local LLM review before copying
+decon -c --strict-llm "$(cap last)"
 
 # Render a capture, sanitize it, and copy it
 cap cat | decon -c
@@ -67,5 +67,8 @@ Useful aliases:
 
 ```bash
 alias dcap='decon -c "$(cap last)"'
-alias dcap-llm='decon -c --llm "$(cap last)"'
+alias dcap-llm='decon -c --strict-llm "$(cap last)"'
 ```
+
+`--strict-llm` is preferable at a sharing boundary: if Ollama classification or
+final review fails, DECON does not update the clipboard.

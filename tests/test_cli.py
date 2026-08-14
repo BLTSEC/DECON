@@ -171,6 +171,36 @@ class TestCLIBasic:
             data = json.load(f)
         assert "10.4.12.50" in data["mapping"]
 
+    def test_imported_map_can_be_updated_in_place(self, tmp_path, monkeypatch, capsys):
+        path = tmp_path / "engagement.decon-map.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "mapping": {"10.4.12.50": "[IPV4_REDACTED_0001]"},
+                    "counters": {"ipv4": 1},
+                }
+            )
+        )
+        monkeypatch.setattr("sys.stdin", StringIO("10.4.12.51\n"))
+
+        assert (
+            main(
+                [
+                    "--import-map",
+                    str(path),
+                    "--export-map",
+                    str(path),
+                    "--quiet",
+                ]
+            )
+            == 0
+        )
+        capsys.readouterr()
+
+        data = json.loads(path.read_text())
+        assert data["mapping"]["10.4.12.50"] == "[IPV4_REDACTED_0001]"
+        assert data["mapping"]["10.4.12.51"] == "[IPV4_REDACTED_0002]"
+
     def test_check_with_imported_map_detects_existing_replacements(
         self, tmp_path, monkeypatch, capsys
     ):
