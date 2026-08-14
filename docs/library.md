@@ -13,11 +13,24 @@ restored = desanitize(clean, mapping)
 
 # Sanitize, ask a model, restore the answer — in one call
 answer, mapping = ask_safely("What are two attack paths here?")
+
+# Use an existing Codex subscription instead of an API key
+answer, mapping = ask_safely(
+    "What should I investigate next?",
+    provider="codex",
+)
 ```
 
 `mapping` is `{placeholder: original}` — the direction you need to restore
 text, and what `desanitize()` expects. Note this is the inverse of
 `RedactionEngine.mapping`, which is keyed by the original value.
+
+`ask_safely()` accepts `claude`, `openai`, `ollama`, `codex`, and
+`claude-code`. The CLI-backed providers use `cli_mode="isolated"` and a
+600-second timeout by default; override these with `cli_mode="standard"` and
+`cli_timeout_seconds=...` when normal project context is intentionally needed.
+They require subscription authentication and do not inherit API-key/provider
+environment variables.
 
 ## Per-engagement targets file
 
@@ -61,5 +74,5 @@ from decon import build_engine
 
 engine = build_engine("acme-targets.txt", profile="client-share")
 report = engine.redact_with_report(text)
-print(report.unique_applied())      # (category, original, placeholder) tuples
+print(report.unique_applied())  # (category, original, placeholder) tuples
 ```

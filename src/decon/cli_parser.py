@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 
 from decon import __version__
+from decon.ask import PROVIDER_NAMES
 from decon.state import DEFAULT_SESSION
 
 
@@ -108,7 +109,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--provider",
-        choices=["claude", "openai", "ollama"],
+        choices=PROVIDER_NAMES,
         help="Provider for --ask (default: claude)",
     )
     parser.add_argument(

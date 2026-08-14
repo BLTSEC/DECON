@@ -72,31 +72,77 @@ reasons over stable placeholders.
 ```bash
 decon --ask "What are two attack paths here?" scan.txt
 decon --ask "Summarize the AD findings" --provider ollama notes.md
+
+# Local Ollama leak review, then a subscription-backed Codex request
+decon --strict-llm --ask "What should I investigate next?" \
+  --provider codex notes.md
+
+# The same workflow through a Claude subscription
+decon --strict-llm --ask "Summarize the attack paths" \
+  --provider claude-code notes.md
 ```
 
 Because placeholders are consistent, the model can still reason about topology
 and repetition — it just does so over `[HOST_REDACTED_0001]` instead of a real
 hostname, and its answer comes back with your hostnames restored.
 
-Cloud providers need the optional extra; Ollama needs nothing beyond the
-standard library:
+Choose a provider according to where it runs and how it authenticates:
+
+| Provider | Backend | Authentication |
+|---|---|---|
+| `ollama` | Local Ollama server | None |
+| `codex` | Installed Codex CLI | ChatGPT subscription (`codex login`) |
+| `claude-code` | Installed Claude Code CLI | Claude subscription (`claude auth login`) |
+| `openai` | OpenAI API | `OPENAI_API_KEY` |
+| `claude` | Anthropic API | `ANTHROPIC_API_KEY` |
+
+```bash
+codex login
+env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN claude auth login
+```
+
+The API providers need the optional extra; Ollama and the CLI providers use
+only the Python standard library:
 
 ```bash
 pipx inject decon anthropic openai     # or: pip install 'decon[ask]'
 export ANTHROPIC_API_KEY=...           # or OPENAI_API_KEY
 ```
 
+For `codex` and `claude-code`, DECON intentionally removes API-key and alternate
+provider environment variables from the child process, then verifies that the
+CLI is using first-party subscription authentication **before** sending the
+sanitized prompt. It will not silently fall back to metered API billing. Omit
+`--model` to use the CLI's selected default.
+
 ```toml
 [ask]
-provider = "claude"          # claude | openai | ollama
+provider = "codex"           # claude | openai | ollama | codex | claude-code
 host = "http://localhost:11434"
 max_tokens = 16000
 warn_chars = 50000           # warn above this input size; 0 disables
 
+[ask.cli]
+mode = "isolated"            # isolated | standard
+timeout_seconds = 600
+
 [ask.models]                 # keyed by provider, so --provider is always safe
 claude = "claude-opus-5"
 ollama = "qwen3.5:9b"
+# codex = "gpt-5.6-sol"      # omitted: use the CLI default
+# claude-code = "sonnet"     # omitted: use the CLI default
 ```
+
+CLI runs are isolated by default: DECON uses an empty owner-only temporary
+directory, disables session persistence, ignores Codex user rules/config, and
+starts Claude Code in safe mode with tools and Chrome integration disabled.
+Codex also stays in its read-only sandbox. Temporary state is deleted when the
+command ends.
+
+`mode = "standard"` opts into the current directory and normal CLI
+customization. This can expose project files, instructions, hooks, or tool
+results that DECON did not sanitize. Use it only when that additional local
+context is intentional and trusted.
 
 DECON warns before sending an unusually large question and document, since it
 cannot know a provider's context limit or your budget. OpenAI requests set
@@ -105,8 +151,9 @@ provider abuse-monitoring and account-level retention policies may still apply.
 
 > [!NOTE]
 > Redaction reduces exposure; it does not prove the text is safe to send. Review
-> `decon --dry-run` output before pointing `--ask` at a third-party API for the
-> first time on a new engagement. Prefer `--provider ollama` when nothing may
+> `decon --dry-run` output before pointing `--ask` at a remote provider for the
+> first time on a new engagement. Codex and Claude Code still send the sanitized
+> prompt to their remote services. Prefer `--provider ollama` when nothing may
 > leave the machine.
 
 If a provider's safety classifiers decline the request — security tooling can

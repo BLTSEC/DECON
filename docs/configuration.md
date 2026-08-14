@@ -80,6 +80,41 @@ Invalid tables, rule names, value types, regular expressions, and placeholder
 templates fail with a concise configuration error. See
 [`config.example.toml`](../config.example.toml) for the complete example.
 
+## Direct-question providers
+
+Configure the default provider for `--ask` under `[ask]`:
+
+```toml
+[ask]
+provider = "codex"          # claude | openai | ollama | codex | claude-code
+max_tokens = 16000          # API and Ollama providers
+warn_chars = 50000
+
+[ask.cli]
+mode = "isolated"           # isolated | standard
+timeout_seconds = 600
+
+[ask.models]
+claude = "claude-opus-5"
+ollama = "qwen3.5:9b"
+# codex = "gpt-5.6-sol"     # omitted: use the Codex CLI default
+# claude-code = "sonnet"    # omitted: use the Claude Code default
+```
+
+`claude` and `openai` use metered API credentials. `ollama` is local. `codex`
+and `claude-code` invoke the installed CLIs and require subscription sign-in;
+DECON removes API-key/provider environment variables from those child
+processes and fails the authentication preflight rather than silently falling
+back to API billing.
+
+`isolated` is the default: the CLI runs in an empty owner-only temporary
+directory without a persisted session. Codex ignores user config and rules and
+stays in its read-only sandbox; Claude Code uses safe mode with tools disabled.
+`standard` runs from the current directory with normal CLI customization.
+That can add project files, instructions, hooks, or tools outside DECON's
+redaction boundary, so enable it only for a directory and configuration you
+trust.
+
 ## Typed engagement identifiers
 
 Regex catches common formats, but every engagement has its own naming

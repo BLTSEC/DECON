@@ -162,11 +162,34 @@ class TestApplyConfig:
             ({"ask": {"max_tokens": 0.5}}, "ask.max_tokens"),
             ({"ask": {"max_tokens": 0}}, "positive integer"),
             ({"ask": {"warn_chars": -1}}, "ask.warn_chars"),
+            ({"ask": {"cli": "isolated"}}, "ask.cli must be a table"),
+            ({"ask": {"cli": {"mode": "unsafe"}}}, "ask.cli.mode"),
+            (
+                {"ask": {"cli": {"timeout_seconds": True}}},
+                "ask.cli.timeout_seconds",
+            ),
+            (
+                {"ask": {"cli": {"timeout_seconds": 0}}},
+                "positive integer",
+            ),
         ],
     )
     def test_invalid_config_types_are_rejected(self, config, message):
         with pytest.raises(ConfigError, match=message):
             apply_config_to_engine(RedactionEngine(), config)
+
+    @pytest.mark.parametrize("provider", ["codex", "claude-code"])
+    def test_cli_ask_providers_are_valid(self, provider):
+        apply_config_to_engine(
+            RedactionEngine(),
+            {
+                "ask": {
+                    "provider": provider,
+                    "models": {provider: "explicit-model"},
+                    "cli": {"mode": "isolated", "timeout_seconds": 30},
+                }
+            },
+        )
 
     def test_custom_pattern_must_not_match_empty_text(self):
         config = {"custom": {"patterns": [{"pattern": r"x*"}]}}

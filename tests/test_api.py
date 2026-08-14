@@ -193,6 +193,31 @@ class TestQueryCloudSafe:
         ask_safely(self.SOURCE, provider="ollama", use_config=False, audit=False)
         assert seen["called"]
 
+    @pytest.mark.parametrize("provider", ["codex", "claude-code"])
+    def test_cli_provider_is_selectable_and_receives_cli_options(
+        self, provider, monkeypatch
+    ):
+        seen = {}
+
+        def fake(prompt, model, max_tokens, **kwargs):
+            seen.update(kwargs)
+            return "Start at [HOST_REDACTED_0001]."
+
+        monkeypatch.setitem(ask_mod._PROVIDERS, provider, fake)
+
+        answer, _mapping = ask_safely(
+            self.SOURCE,
+            provider=provider,
+            cli_mode="standard",
+            cli_timeout_seconds=45,
+            use_config=False,
+            audit=False,
+        )
+
+        assert seen["cli_mode"] == "standard"
+        assert seen["cli_timeout_seconds"] == 45
+        assert "dc01.corp.local" in answer
+
     def test_unknown_provider_raises(self):
         with pytest.raises(decon.AskError, match="unknown provider"):
             ask_safely(self.SOURCE, provider="nope", use_config=False)

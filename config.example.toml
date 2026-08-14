@@ -22,16 +22,25 @@ enabled = true                       # log every substitution (default)
 # path = "~/engagement-audit.jsonl"  # default: ~/.local/state/decon/audit.jsonl
 
 [ask]
-provider = "claude"                  # claude | openai | ollama
+provider = "claude"                  # claude | openai | ollama | codex | claude-code
 host = "http://localhost:11434"      # ollama only
 max_tokens = 16000
 warn_chars = 50000                   # warn above this input size; 0 disables
+
+# Codex and Claude Code run in an empty temporary directory by default and do
+# not persist sessions. Standard mode loads normal CLI/project context; use it
+# only in a trusted directory because that context is outside DECON's redaction.
+[ask.cli]
+mode = "isolated"                    # isolated | standard
+timeout_seconds = 600
 
 # Models are keyed by provider so --provider never sends a name to the wrong one
 [ask.models]
 claude = "claude-opus-5"
 openai = "gpt-5"
 ollama = "qwen3.5:9b"
+# codex = "gpt-5.6-sol"              # omit to use the CLI default
+# claude-code = "sonnet"             # omit to use the CLI default
 
 [custom]
 values = ["ACME Corp", "Project Nighthawk"]          # case-sensitive

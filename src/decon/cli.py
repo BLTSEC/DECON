@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Callable
 
 from decon.ask import (
+    DEFAULT_CLI_MODE,
+    DEFAULT_CLI_TIMEOUT_SECONDS,
     DEFAULT_MAX_TOKENS,
     DEFAULT_PROVIDER,
     DEFAULT_WARN_CHARS,
@@ -476,6 +478,7 @@ def _ask_provider(
     neither original string is sent directly.
     """
     ask_cfg = config.get("ask", {})
+    cli_cfg = ask_cfg.get("cli", {})
     configured_provider = ask_cfg.get("provider", DEFAULT_PROVIDER)
     provider = args.provider or configured_provider
 
@@ -507,6 +510,10 @@ def _ask_provider(
             model=model,
             host=ask_cfg.get("host", "http://localhost:11434"),
             max_tokens=ask_cfg.get("max_tokens", DEFAULT_MAX_TOKENS),
+            cli_mode=cli_cfg.get("mode", DEFAULT_CLI_MODE),
+            cli_timeout_seconds=cli_cfg.get(
+                "timeout_seconds", DEFAULT_CLI_TIMEOUT_SECONDS
+            ),
         )
     except AskError as e:
         print(f"Error: {e}", file=sys.stderr)

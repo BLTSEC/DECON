@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "decon"
-version = "0.7.0"
+version = "0.8.0"
 description = "Sanitize operational data before sharing. Consistent placeholders preserve analytical value."
 readme = "README.md"
 license = { text = "MIT" }
@@ -35,12 +35,17 @@ Repository = "https://github.com/BLTSEC/DECON"
 
 [project.optional-dependencies]
 dev = ["pytest>=7", "ruff>=0.12"]
-# Cloud providers for --ask. Kept optional so the core tool stays
-# dependency-free; the Ollama provider needs nothing beyond the stdlib.
+# API providers for --ask. Kept optional so the core tool stays dependency-free;
+# Ollama, Codex CLI, and Claude Code need nothing beyond the stdlib.
 ask = ["anthropic>=0.116", "openai>=1.66"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/decon"]
+
+[tool.hatch.build]
+# Defense in depth: local agent settings can be ignored globally rather than
+# by this repository, but must never enter a source distribution.
+exclude = ["/.claude", "/.codex", "/.agents", "/*.local.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

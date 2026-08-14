@@ -36,3 +36,8 @@ audit.jsonl
 
 # Personal scratch notes — machine- or workflow-specific, not part of the tool
 *.local.md
+
+# Local agent settings can contain machine paths and command allowlists
+.claude/settings.local.json
+.codex/
+.agents/

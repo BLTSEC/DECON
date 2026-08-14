@@ -175,6 +175,24 @@ decon --llm scan.txt
 decon --strict-llm scan.txt
 ```
 
+### Ask with an existing CLI subscription
+
+Review locally with Ollama, send only the sanitized prompt through an existing
+Codex or Claude Code subscription, then restore the answer automatically:
+
+```bash
+decon --strict-llm --ask "What should I investigate next?" \
+  --provider codex notes.md
+
+decon --strict-llm --ask "Summarize the attack paths" \
+  --provider claude-code notes.md
+```
+
+CLI providers default to an isolated, non-persistent run and reject API-key
+authentication before sending the prompt. Sign in first with `codex login` or
+`env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN claude auth login`. API
+providers remain available as `claude` and `openai`.
+
 See [LLM review and direct questions](docs/llm.md) before enabling a provider.
 
 ## Configuration
@@ -214,8 +232,8 @@ and typed identifiers.
 - Maps are replaced atomically but are not encrypted.
 - LLM review is a secondary safety net, not a replacement for deterministic
   rules or human review.
-- `--ask` sends only sanitized text, but provider use still creates an external
-  trust boundary.
+- `--ask` sends only sanitized text from DECON, but remote provider use still
+  creates an external trust boundary.
 - Never commit, upload, or share reversible maps or audit logs.
 
 ## Documentation

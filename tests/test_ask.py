@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import os
 import stat
+import subprocess
 from io import StringIO
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -69,6 +71,16 @@ class TestAskFunction:
     def test_invalid_max_tokens_is_rejected(self, value):
         with pytest.raises(AskError, match="positive integer"):
             ask("q", "doc", provider="claude", max_tokens=value)
+
+    @pytest.mark.parametrize("value", [None, "unsafe", 1])
+    def test_invalid_cli_mode_is_rejected(self, value):
+        with pytest.raises(AskError, match="cli_mode must be one of"):
+            ask("q", "doc", provider="codex", cli_mode=value)
+
+    @pytest.mark.parametrize("value", [0, -1, True, 1.5])
+    def test_invalid_cli_timeout_is_rejected(self, value):
+        with pytest.raises(AskError, match="positive integer"):
+            ask("q", "doc", provider="codex", cli_timeout_seconds=value)
 
     def test_default_model_is_used(self, stub_provider):
         sent = stub_provider()
@@ -175,6 +187,216 @@ class TestOpenAIProvider:
 
         assert ask_mod._ask_openai("p", "gpt-5", 100) == "an answer"
         assert sent["store"] is False
+
+
+class TestCliProviders:
+    CLAUDE_SUBSCRIPTION = (
+        '{"loggedIn":true,"authMethod":"oauth_claudeai","apiProvider":"firstParty"}'
+    )
+
+    @staticmethod
+    def _completed(command, *, stdout="", stderr="", returncode=0):
+        return subprocess.CompletedProcess(command, returncode, stdout, stderr)
+
+    def test_codex_uses_subscription_auth_and_an_isolated_process(self, monkeypatch):
+        calls = []
+        monkeypatch.setenv("OPENAI_API_KEY", "must-not-be-inherited")
+        monkeypatch.setenv("CODEX_API_KEY", "must-not-be-inherited")
+        monkeypatch.setenv("DECON_TEST_MARKER", "preserved")
+
+        def fake_run(command, **kwargs):
+            calls.append((command, kwargs))
+            if command == ["codex", "login", "status"]:
+                return self._completed(command, stdout="Logged in using ChatGPT\n")
+            cwd = Path(kwargs["cwd"])
+            assert cwd.is_dir()
+            assert stat.S_IMODE(cwd.stat().st_mode) == 0o700
+            return self._completed(command, stdout="an answer\n")
+
+        monkeypatch.setattr(ask_mod.subprocess, "run", fake_run)
+
+        answer = ask(
+            "What next?",
+            "[HOST_REDACTED_0001] is up",
+            provider="codex",
+        )
+
+        assert answer == "an answer\n"
+        assert len(calls) == 2
+        command, options = calls[1]
+        isolated_cwd = Path(options["cwd"])
+        assert not isolated_cwd.exists()
+        assert command[:2] == ["codex", "exec"]
+        assert "--ephemeral" in command
+        assert command[command.index("--sandbox") + 1] == "read-only"
+        assert "--ignore-user-config" in command
+        assert "--ignore-rules" in command
+        assert "--model" not in command
+        assert "What next?" not in command
+        assert "[HOST_REDACTED_0001]" not in command
+        assert "What next?" in options["input"]
+        assert "[HOST_REDACTED_0001]" in options["input"]
+        assert "OPENAI_API_KEY" not in options["env"]
+        assert "CODEX_API_KEY" not in options["env"]
+        assert options["env"]["DECON_TEST_MARKER"] == "preserved"
+        assert options.get("shell", False) is False
+
+    def test_claude_code_uses_subscription_auth_and_an_isolated_process(
+        self, monkeypatch
+    ):
+        calls = []
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-be-inherited")
+        monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "must-not-be-inherited")
+
+        def fake_run(command, **kwargs):
+            calls.append((command, kwargs))
+            if command == ["claude", "auth", "status"]:
+                return self._completed(command, stdout=self.CLAUDE_SUBSCRIPTION)
+            assert Path(kwargs["cwd"]).is_dir()
+            return self._completed(command, stdout="an answer\n")
+
+        monkeypatch.setattr(ask_mod.subprocess, "run", fake_run)
+
+        assert ask("q", "[HOST_REDACTED_0001]", provider="claude-code") == (
+            "an answer\n"
+        )
+
+        command, options = calls[1]
+        assert command[:2] == ["claude", "-p"]
+        assert "--safe-mode" in command
+        assert "--no-chrome" in command
+        assert command[command.index("--permission-mode") + 1] == "dontAsk"
+        assert command[command.index("--tools") + 1] == ""
+        assert "--model" not in command
+        assert "q" not in command
+        assert "[HOST_REDACTED_0001]" in options["input"]
+        assert "ANTHROPIC_API_KEY" not in options["env"]
+        assert "ANTHROPIC_AUTH_TOKEN" not in options["env"]
+
+    @pytest.mark.parametrize(
+        ("provider", "auth_command", "auth_stdout", "expected_flag"),
+        [
+            (
+                "codex",
+                ["codex", "login", "status"],
+                "Logged in using ChatGPT\n",
+                "--ignore-user-config",
+            ),
+            (
+                "claude-code",
+                ["claude", "auth", "status"],
+                CLAUDE_SUBSCRIPTION,
+                "--safe-mode",
+            ),
+        ],
+    )
+    def test_standard_mode_uses_current_context_without_isolation_flags(
+        self,
+        monkeypatch,
+        provider,
+        auth_command,
+        auth_stdout,
+        expected_flag,
+    ):
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append((command, kwargs))
+            stdout = auth_stdout if command == auth_command else "answer"
+            return self._completed(command, stdout=stdout)
+
+        monkeypatch.setattr(ask_mod.subprocess, "run", fake_run)
+        ask("q", "doc", provider=provider, cli_mode="standard")
+
+        command, options = calls[1]
+        assert expected_flag not in command
+        assert options["cwd"] is None
+
+    @pytest.mark.parametrize(
+        ("provider", "auth_command", "auth_stdout"),
+        [
+            ("codex", ["codex", "login", "status"], "Logged in using ChatGPT"),
+            (
+                "claude-code",
+                ["claude", "auth", "status"],
+                CLAUDE_SUBSCRIPTION,
+            ),
+        ],
+    )
+    def test_explicit_model_is_forwarded(
+        self, monkeypatch, provider, auth_command, auth_stdout
+    ):
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            stdout = auth_stdout if command == auth_command else "answer"
+            return self._completed(command, stdout=stdout)
+
+        monkeypatch.setattr(ask_mod.subprocess, "run", fake_run)
+        ask("q", "doc", provider=provider, model="chosen-model")
+
+        assert calls[1][calls[1].index("--model") + 1] == "chosen-model"
+
+    @pytest.mark.parametrize(
+        ("provider", "auth_stdout", "message"),
+        [
+            ("codex", "Logged in using an API key", "signed in with ChatGPT"),
+            (
+                "claude-code",
+                '{"loggedIn":true,"authMethod":"api_key","apiProvider":"firstParty"}',
+                "signed in with a Claude subscription",
+            ),
+        ],
+    )
+    def test_metered_api_auth_fails_before_prompt_transmission(
+        self, monkeypatch, provider, auth_stdout, message
+    ):
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append((command, kwargs))
+            return self._completed(command, stdout=auth_stdout)
+
+        monkeypatch.setattr(ask_mod.subprocess, "run", fake_run)
+
+        with pytest.raises(AskError, match=message):
+            ask("sensitive question", "redacted document", provider=provider)
+
+        assert len(calls) == 1
+        assert calls[0][1]["input"] is None
+
+    def test_provider_failure_is_bounded_and_clear(self, monkeypatch):
+        calls = 0
+
+        def fake_run(command, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return self._completed(command, stdout="Logged in using ChatGPT")
+            return self._completed(command, returncode=7, stderr="x" * 2_000)
+
+        monkeypatch.setattr(ask_mod.subprocess, "run", fake_run)
+
+        with pytest.raises(AskError, match="Codex CLI exited with status 7") as exc:
+            ask("q", "doc", provider="codex")
+        assert len(str(exc.value)) < 1_100
+
+    @pytest.mark.parametrize(
+        ("error", "message"),
+        [
+            (FileNotFoundError(), "was not found on PATH"),
+            (subprocess.TimeoutExpired("codex", 3), "timed out"),
+        ],
+    )
+    def test_process_start_errors_are_normalized(self, monkeypatch, error, message):
+        monkeypatch.setattr(
+            ask_mod.subprocess,
+            "run",
+            lambda *args, **kwargs: (_ for _ in ()).throw(error),
+        )
+        with pytest.raises(AskError, match=message):
+            ask("q", "doc", provider="codex", cli_timeout_seconds=3)
 
 
 class TestAskCli:
@@ -361,6 +583,27 @@ class TestAskCli:
         capsys.readouterr()
         assert seen["called"]
 
+    @pytest.mark.parametrize("provider", ["codex", "claude-code"])
+    def test_cli_provider_round_trip_redacts_and_restores(
+        self, provider, monkeypatch, capsys
+    ):
+        sent = {}
+
+        def fake(prompt, model, max_tokens, **kwargs):
+            sent["prompt"] = prompt
+            sent["model"] = model
+            return "Check [HOST_REDACTED_0001]."
+
+        monkeypatch.setitem(ask_mod._PROVIDERS, provider, fake)
+        monkeypatch.setattr("sys.stdin", StringIO(self.SOURCE))
+
+        assert main(["--ask", "What next?", "--provider", provider]) == 0
+        captured = capsys.readouterr()
+
+        assert "dc01.corp.local" not in sent["prompt"]
+        assert sent["model"] is None
+        assert "dc01.corp.local" in captured.out
+
     def test_ask_still_records_audit(self, stub_provider, monkeypatch, capsys):
         from decon.audit import audit_path
 
@@ -428,6 +671,27 @@ class TestProviderModelPairing:
         assert main(["--ask", "q", "--provider", "ollama", "--model", "llama3"]) == 0
         capsys.readouterr()
         assert seen["model"] == "llama3"
+
+    def test_cli_settings_are_forwarded(self, tmp_path, monkeypatch, capsys):
+        self._config(
+            tmp_path,
+            monkeypatch,
+            '[ask]\nprovider = "codex"\n[ask.cli]\nmode = "standard"\n'
+            "timeout_seconds = 45\n",
+        )
+        seen = {}
+
+        def fake(prompt, model, max_tokens, **kwargs):
+            seen.update(kwargs)
+            return "ok"
+
+        monkeypatch.setitem(ask_mod._PROVIDERS, "codex", fake)
+        monkeypatch.setattr("sys.stdin", StringIO("host dc01.corp.local\n"))
+
+        assert main(["--ask", "q"]) == 0
+        capsys.readouterr()
+        assert seen["cli_mode"] == "standard"
+        assert seen["cli_timeout_seconds"] == 45
 
 
 class TestSizeGuard:

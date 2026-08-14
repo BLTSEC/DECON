@@ -23,7 +23,12 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from decon.ask import DEFAULT_MAX_TOKENS, DEFAULT_PROVIDER
+from decon.ask import (
+    DEFAULT_CLI_MODE,
+    DEFAULT_CLI_TIMEOUT_SECONDS,
+    DEFAULT_MAX_TOKENS,
+    DEFAULT_PROVIDER,
+)
 from decon.ask import ask as _ask
 from decon.audit import write_entry
 from decon.config import (
@@ -128,6 +133,8 @@ def ask_safely(
     model: str | None = None,
     host: str = "http://localhost:11434",
     max_tokens: int = DEFAULT_MAX_TOKENS,
+    cli_mode: str = DEFAULT_CLI_MODE,
+    cli_timeout_seconds: int = DEFAULT_CLI_TIMEOUT_SECONDS,
     profile: str | None = None,
     use_config: bool = True,
     audit: bool = True,
@@ -169,6 +176,8 @@ def ask_safely(
         model=model,
         host=host,
         max_tokens=max_tokens,
+        cli_mode=cli_mode,
+        cli_timeout_seconds=cli_timeout_seconds,
     )
     restored = desanitize(answer, mapping)
 

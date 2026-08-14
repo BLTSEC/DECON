@@ -8,6 +8,8 @@ import sys
 import tomllib
 from pathlib import Path
 
+from decon.ask import CLI_MODES, PROVIDER_NAMES
+
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "decon" / "decon.toml"
 
 DEFAULT_CONFIG = """\
@@ -32,15 +34,22 @@ enabled = true
 # path = "~/engagement-audit.jsonl"
 
 [ask]
-# Provider for --ask. Cloud providers need: pip install 'decon[ask]'
+# API providers: claude, openai. Local/subscription providers: ollama, codex,
+# claude-code. API providers need: pip install 'decon[ask]'
 provider = "claude"
 # host = "http://localhost:11434"   # ollama only
 # max_tokens = 16000
 # warn_chars = 50000                # warn above this input size; 0 disables
 
+[ask.cli]
+mode = "isolated"                  # isolated | standard
+timeout_seconds = 600
+
 # [ask.models]                      # per-provider, so --provider is always safe
 # claude = "claude-opus-5"
 # ollama = "qwen3.5:9b"
+# codex = "gpt-5.6-sol"             # omitted: use the CLI default
+# claude-code = "sonnet"            # omitted: use the CLI default
 
 [custom]
 values = []          # case-sensitive literal strings
@@ -294,9 +303,8 @@ def apply_config_to_engine(engine, config: dict, profile: str | None = None) -> 
             raise ConfigError(f"llm.{key} must be a non-empty string")
 
     ask = _require_table(config, "ask")
-    providers = ("claude", "openai", "ollama")
-    if "provider" in ask and ask["provider"] not in providers:
-        raise ConfigError("ask.provider must be claude, openai, or ollama")
+    if "provider" in ask and ask["provider"] not in PROVIDER_NAMES:
+        raise ConfigError("ask.provider must be one of: " + ", ".join(PROVIDER_NAMES))
     for key in ("model", "host"):
         if key in ask and (not isinstance(ask[key], str) or not ask[key].strip()):
             raise ConfigError(f"ask.{key} must be a non-empty string")
@@ -304,7 +312,7 @@ def apply_config_to_engine(engine, config: dict, profile: str | None = None) -> 
     if not isinstance(models, dict):
         raise ConfigError("ask.models must be a table of provider = model")
     for name, value in models.items():
-        if name not in providers:
+        if name not in PROVIDER_NAMES:
             raise ConfigError(f"Unknown provider in ask.models: {name}")
         if not isinstance(value, str) or not value.strip():
             raise ConfigError(f"ask.models.{name} must be a non-empty string")
@@ -320,6 +328,17 @@ def apply_config_to_engine(engine, config: dict, profile: str | None = None) -> 
         or ask["warn_chars"] < 0
     ):
         raise ConfigError("ask.warn_chars must be a non-negative integer")
+    cli = ask.get("cli", {})
+    if not isinstance(cli, dict):
+        raise ConfigError("ask.cli must be a table")
+    if "mode" in cli and cli["mode"] not in CLI_MODES:
+        raise ConfigError("ask.cli.mode must be isolated or standard")
+    if "timeout_seconds" in cli and (
+        not isinstance(cli["timeout_seconds"], int)
+        or isinstance(cli["timeout_seconds"], bool)
+        or cli["timeout_seconds"] <= 0
+    ):
+        raise ConfigError("ask.cli.timeout_seconds must be a positive integer")
 
     audit = _require_table(config, "audit")
     if "enabled" in audit and not isinstance(audit["enabled"], bool):
