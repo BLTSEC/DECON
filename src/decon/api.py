@@ -28,6 +28,7 @@ from decon.ask import (
     DEFAULT_CLI_TIMEOUT_SECONDS,
     DEFAULT_MAX_TOKENS,
     DEFAULT_PROVIDER,
+    AskError,
 )
 from decon.ask import ask as _ask
 from decon.audit import write_entry
@@ -38,6 +39,7 @@ from decon.config import (
     load_config,
 )
 from decon.engine import RedactionEngine
+from decon.safety import is_remote_provider, scan_high_risk
 
 __all__ = [
     "build_engine",
@@ -138,6 +140,7 @@ def ask_safely(
     profile: str | None = None,
     use_config: bool = True,
     audit: bool = True,
+    force_ask: bool = False,
 ) -> tuple[str, dict[str, str]]:
     """Sanitize a prompt, send it to a provider, and restore the response.
 
@@ -155,6 +158,15 @@ def ask_safely(
     report = engine.redact_with_report(prompt)
     mapping = engine.reverse_map()
 
+    if is_remote_provider(provider, host):
+        findings = scan_high_risk(report.text)
+        if findings and not force_ask:
+            categories = sorted({finding.category for finding in findings})
+            raise AskError(
+                "provider transmission blocked; high-confidence credential "
+                f"material remains ({', '.join(categories)})"
+            )
+
     # A provider can fail after receiving the request, so record the attempt
     # before crossing the trust boundary without claiming a completed response.
     audit_config = get_audit_config(config)
@@ -162,9 +174,11 @@ def ask_safely(
         write_entry(
             report.unique_applied(),
             mode="ask_safely",
-            status="attempted",
+            status="forced_attempt" if force_ask else "attempted",
             sources=[f"<{provider}>"],
             path=audit_config.get("path"),
+            detail=audit_config.get("detail", "metadata"),
+            record_empty=force_ask,
             quiet=True,
         )
 

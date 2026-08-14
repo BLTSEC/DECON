@@ -6,7 +6,7 @@ import json
 import os
 import re
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from decon.default_rules import build_default_rules
@@ -94,7 +94,12 @@ class RedactionEngine:
             text,
         )
 
-    def redact_with_report(self, text: str) -> RedactionReport:
+    def redact_with_report(
+        self,
+        text: str,
+        *,
+        defer_rules: frozenset[str] = frozenset(),
+    ) -> RedactionReport:
         """Redact text and return details about replacements applied."""
         text = self._unfold_ldap(text)
         # Reserve every placeholder token already present in the input. Without
@@ -131,7 +136,7 @@ class RedactionEngine:
         applied: list[AppliedRedaction] = []
         try:
             for rule in self.rules:
-                if not rule.enabled:
+                if not rule.enabled or rule.name in defer_rules:
                     continue
                 text = rule.apply(text, self.mapping, self.counters, applied)
             text = self._retrospective_replace(text, applied)
@@ -147,6 +152,44 @@ class RedactionEngine:
             for placeholder in transient_reservations:
                 if self.mapping.get(placeholder) == placeholder:
                     self.mapping.pop(placeholder, None)
+
+    def redact_rule_values_with_report(
+        self,
+        text: str,
+        selections: dict[str, set[str]],
+    ) -> RedactionReport:
+        """Apply selected values through their original typed rules.
+
+        Used after local context classification. The temporary validators make
+        the selected occurrence set authoritative without adding persistent
+        rules or allowlist identity mappings that would leak kept values into
+        an exported map.
+        """
+        applied: list[AppliedRedaction] = []
+        for rule in self.rules:
+            selected = selections.get(rule.name)
+            if not selected or not rule.enabled:
+                continue
+            original_validator = rule.validator
+
+            def _selected(
+                value: str,
+                *,
+                allowed: frozenset[str] = frozenset(selected),
+                validator=original_validator,
+            ) -> bool:
+                return value in allowed and (validator is None or validator(value))
+
+            text = replace(rule, validator=_selected).apply(
+                text,
+                self.mapping,
+                self.counters,
+                applied,
+            )
+        for _category, original, placeholder in applied:
+            if original != placeholder:
+                self.reverse_mapping.setdefault(placeholder, original)
+        return RedactionReport(text=text, applied=applied)
 
     def _retrospective_replace(
         self,
@@ -171,8 +214,14 @@ class RedactionEngine:
             "[DOMAIN_REDACTED_",
         )
         candidates: list[tuple[str, str]] = []
+        hash_candidates: list[tuple[str, str]] = []
         for original, placeholder in self.mapping.items():
             if original == placeholder:  # allowlist identity
+                continue
+            if placeholder.startswith("NTLM_HASH_") and re.fullmatch(
+                r"[0-9a-fA-F]{32}", original
+            ):
+                hash_candidates.append((original, placeholder))
                 continue
             if not any(placeholder.startswith(p) for p in _safe_prefixes):
                 continue
@@ -190,7 +239,7 @@ class RedactionEngine:
                 continue
             candidates.append((original, placeholder))
 
-        if not candidates:
+        if not candidates and not hash_candidates:
             return text
 
         # Apply each boundary class in a single pass. The previous one-regex-per-
@@ -239,6 +288,30 @@ class RedactionEngine:
         # found; hostnames and users retain strict standalone boundaries.
         text = _replace_candidates(text, domain_candidates, r"(?<!\w)")
         text = _replace_candidates(text, strict_candidates, r"(?<![.\w])")
+
+        if hash_candidates:
+            by_hash = {
+                original.casefold(): (original, placeholder)
+                for original, placeholder in hash_candidates
+            }
+            hash_pattern = re.compile(
+                r"(?<![0-9a-fA-F])(?:"
+                + "|".join(
+                    re.escape(original)
+                    for original, _placeholder in sorted(
+                        by_hash.values(), key=lambda item: len(item[0]), reverse=True
+                    )
+                )
+                + r")(?![0-9a-fA-F])",
+                re.IGNORECASE,
+            )
+
+            def _replace_hash(match: re.Match[str]) -> str:
+                original, placeholder = by_hash[match.group(0).casefold()]
+                applied.append(("ntlm_hash", original, placeholder))
+                return placeholder
+
+            text = hash_pattern.sub(_replace_hash, text)
 
         return text
 

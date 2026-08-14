@@ -108,6 +108,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Ask an LLM about the redacted input, then restore real values",
     )
     parser.add_argument(
+        "--ask-preview",
+        action="store_true",
+        help="Print the exact sanitized --ask prompt without transmitting it",
+    )
+    parser.add_argument(
+        "--force-ask",
+        action="store_true",
+        help="Transmit despite outbound safety findings (dangerous)",
+    )
+    parser.add_argument(
         "--provider",
         choices=PROVIDER_NAMES,
         help="Provider for --ask (default: claude)",
@@ -195,6 +205,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--init-config",
         action="store_true",
         help="Create default config file",
+    )
+    parser.add_argument(
+        "--doctor",
+        action="store_true",
+        help="Check configuration, permissions, Ollama, and ask providers",
     )
     parser.add_argument(
         "--no-audit",

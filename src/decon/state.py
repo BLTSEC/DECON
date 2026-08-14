@@ -1,8 +1,8 @@
 """Owner-only state directory for sessions and the audit log.
 
-Everything DECON persists here contains real, unredacted values, so the
-directory is created 0700 and every file inside it 0600 — the same posture as
-an exported map.
+Sessions and optional full-detail audits contain real values. Metadata audits
+do not, but all state uses the stricter posture: directories are 0700 and files
+are 0600.
 """
 
 from __future__ import annotations

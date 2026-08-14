@@ -220,10 +220,13 @@ class TestAuditLog:
 
         entries = self._entries()
         assert len(entries) == 1
-        assert entries[0]["mode"] == "redact"
-        subs = entries[0]["substitutions"]
-        assert any(s["original"] == "dc01.corp.local" for s in subs)
-        assert all({"category", "original", "placeholder"} <= s.keys() for s in subs)
+        assert entries[0]["schema_version"] == 2
+        assert entries[0]["operation"] == "redact"
+        assert entries[0]["source_count"] == 1
+        assert entries[0]["categories"]["hostname"] == 1
+        assert "sources" not in entries[0]
+        assert "substitutions" not in entries[0]
+        assert "dc01.corp.local" not in json.dumps(entries[0])
 
     def test_appends_one_line_per_run(self, monkeypatch, capsys):
         for host in ("dc01.corp.local", "dc02.corp.local"):
@@ -317,7 +320,9 @@ class TestAuditLog:
 
         entries = self._entries()
         assert len(entries) == 2
-        assert {e["sources"][0] for e in entries} == {str(a), str(b)}
+        assert all(entry["source_count"] == 1 for entry in entries)
+        assert str(a) not in json.dumps(entries)
+        assert str(b) not in json.dumps(entries)
 
 
 # ---------------------------------------------------------------------------
@@ -440,7 +445,7 @@ class TestReverseAuditing:
         capsys.readouterr()
 
         modes = [
-            json.loads(line)["mode"]
+            json.loads(line)["operation"]
             for line in audit_path().read_text().splitlines()
             if line
         ]

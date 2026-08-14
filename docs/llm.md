@@ -2,9 +2,19 @@
 
 [← README](../README.md)
 
-Regex cannot reliably identify every bare username, project name, or unusual
-credential. `--llm` sends the regex-redacted text to an Ollama-compatible
-endpoint and asks it to report possible survivors.
+Regex cannot reliably distinguish PII from timestamp-shaped telemetry, or find
+every bare username, project name, and unusual credential. `--llm` therefore
+runs a hybrid local pipeline:
+
+1. Credentials, configured targets, and unambiguous identifiers redact
+   deterministically.
+2. Ollama classifies card, phone, and SSN-shaped candidates as `keep`, `redact`,
+   or `uncertain`, using bounded surrounding context.
+3. DECON applies typed placeholders itself and reviews the result for survivors.
+
+The model returns candidate IDs through an enforced JSON schema. It never
+rewrites the document or controls placeholder mappings, and `uncertain` always
+means redact.
 
 ```bash
 brew install ollama
@@ -14,11 +24,10 @@ ollama pull qwen3.5:9b
 decon --llm scan.txt
 ```
 
-The LLM is normally a **reviewer, not an automatic redactor**. Findings are
-shown on stderr in non-interactive runs. In an interactive terminal, you can
-choose which findings to redact. The exception is `--llm --ask`: anything the
-local reviewer flags is automatically redacted before the prompt can be sent to
-the selected provider.
+PII decisions are applied automatically. Final-review findings are shown on
+stderr in non-interactive runs; an interactive terminal can choose which ones
+to redact. With `--llm --ask`, final-review findings are automatically redacted
+before the provider boundary.
 
 LLM review also works with:
 
@@ -28,8 +37,9 @@ LLM review also works with:
 - `--output-dir` — reviews every batch file and reports findings
 
 Large inputs are reviewed in overlapping, line-aware chunks rather than being
-truncated. If Ollama is unavailable, DECON warns and continues with the
-deterministic rules.
+truncated. Candidate requests are also bounded and batched. If optional Ollama
+classification is unavailable or invalid, DECON warns and conservatively
+redacts every ambiguous candidate before continuing.
 
 Use `--strict-llm` when continuing without that safety check is unacceptable:
 
@@ -38,20 +48,20 @@ decon --strict-llm -o scan.redacted.txt scan.txt
 decon --strict-llm --ask "What should I investigate next?" scan.txt
 ```
 
-Strict mode implies `--llm` and emits nothing unless Ollama returns a valid
-`CLEAN`/`FOUND:` response and every finding is redacted. Interactive runs may
-accept all findings; `--ask` redacts them automatically before provider
-transmission. Non-interactive output is blocked when findings remain. Batch
-mode reviews every file before creating the output tree, so one failed review
+Strict mode implies `--llm` and emits nothing unless classification and the
+structured final review both succeed and every final finding is resolved.
+Interactive runs may accept findings; `--ask` redacts them automatically before
+provider transmission. Non-interactive output is blocked when findings remain.
+Batch mode reviews every file before creating the output tree, so one failure
 cannot leave a partially emitted batch. Enable the same policy by default with
 `required = true` under `[llm]`.
 
 > [!WARNING]
-> The review text may still contain the exact sensitive values the regex rules
-> missed. The default endpoint is local. Point `llm.host` only at a system you
-> trust, and secure Ollama before exposing it to a container or network. Strict
-> mode prevents fail-open output; it cannot prove that a probabilistic reviewer
-> noticed every leak or resisted instructions embedded in the reviewed text.
+> Candidate context contains the exact PII-shaped value. DECON requires a
+> loopback Ollama URL by default. A non-loopback reviewer is used only after the
+> explicit `llm.allow_remote = true` trust-boundary opt-in. Strict mode prevents
+> fail-open output; it cannot prove that a probabilistic model made every
+> judgment correctly or resisted every instruction embedded in reviewed text.
 
 For a container, configure the host endpoint explicitly:
 
@@ -60,6 +70,7 @@ For a container, configure the host endpoint explicitly:
 enabled = true
 required = true
 host = "http://host.docker.internal:11434"
+allow_remote = true
 ```
 
 ## Asking an LLM directly
@@ -72,6 +83,9 @@ reasons over stable placeholders.
 ```bash
 decon --ask "What are two attack paths here?" scan.txt
 decon --ask "Summarize the AD findings" --provider ollama notes.md
+
+# Preview the exact sanitized user prompt; no provider auth or transmission
+decon --ask "What are two attack paths here?" --ask-preview scan.txt
 
 # Local Ollama leak review, then a subscription-backed Codex request
 decon --strict-llm --ask "What should I investigate next?" \
@@ -149,9 +163,15 @@ cannot know a provider's context limit or your budget. OpenAI requests set
 `store=false` to avoid retaining a reusable Responses API object; normal
 provider abuse-monitoring and account-level retention policies may still apply.
 
+Immediately before a remote provider call, DECON independently scans the exact
+outbound user prompt for known credential forms. High-confidence survivors
+block transmission; possible undeclared public domains and bare host labels
+produce count-only warnings. `--force-ask` bypasses a credential block and is
+intentionally noisy. It cannot bypass a failed `--strict-llm` run.
+
 > [!NOTE]
 > Redaction reduces exposure; it does not prove the text is safe to send. Review
-> `decon --dry-run` output before pointing `--ask` at a remote provider for the
+> `decon --ask-preview` output before pointing `--ask` at a remote provider for the
 > first time on a new engagement. Codex and Claude Code still send the sanitized
 > prompt to their remote services. Prefer `--provider ollama` when nothing may
 > leave the machine.

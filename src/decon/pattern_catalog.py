@@ -55,7 +55,11 @@ _MAC = re.compile(
     r"(?![:\w])"
 )
 
-_EMAIL = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
+_EMAIL = re.compile(
+    r"(?<![a-zA-Z0-9._%+-])"
+    r"[a-zA-Z0-9][a-zA-Z0-9._%+-]{0,63}"
+    r"@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
+)
 
 _PHONE = re.compile(
     r"(?<!\d)"
@@ -252,17 +256,40 @@ _NTLM_HASH = re.compile(
     r"(?<![0-9a-fA-F])[0-9a-fA-F]{32}:[0-9a-fA-F]{32}(?![0-9a-fA-F])"
 )
 
+# A single NT hash is ambiguous (it can also be an MD5 checksum), so this rule
+# is disabled by default and enabled by the pentest profile. Context-specific
+# forms below remain enabled everywhere.
+_NTLM_HASH_BARE = re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{32}(?![0-9a-fA-F])")
+
+# Hashcat potfiles commonly contain "NT-hash:recovered plaintext". Reject a
+# second 32-hex value so an LM:NT pair remains owned by _NTLM_HASH.
+_NTHASH_PLAINTEXT = re.compile(
+    r"(?m)^(?P<hash>[0-9a-fA-F]{32}):"
+    r"(?P<plaintext>(?![0-9a-fA-F]{32}\s*$)[^\r\n]+)$"
+)
+
+# Impacket accepts an empty LM half: ``-hashes :<NT hash>``. Match only the NT
+# half so the command remains useful and the placeholder retains its hash type.
+_IMPACKET_HASHES = re.compile(
+    r"(?i)(?P<prefix>(?:^|\s)--?hash(?:es)?\s+['\"]?(?:[0-9a-f]{32})?:)"
+    r"(?P<hash>[0-9a-f]{32})(?=['\"]?(?:\s|$))",
+    re.MULTILINE,
+)
+
 _SAM_DUMP = re.compile(
     r"^(?:[^\s:]+[\\\/])?[^\s:]+:\d+:[0-9a-fA-F]{32}:[0-9a-fA-F]{32}:::$",
     re.MULTILINE,
 )
 
 _NTLMV2_HASH = re.compile(
-    r"[^\s:]+::[^\s:]*:[0-9a-fA-F]{16}:[0-9a-fA-F]{32}:[0-9a-fA-F]{20,}"
+    r"(?<!\S)[^\s:]+::[^\s:]*:[0-9a-fA-F]{16}:"
+    r"[0-9a-fA-F]{32}:[0-9a-fA-F]{20,}"
 )
 
 _KERBEROS_KEY = re.compile(
-    r"[^\s:]+:(?:aes256-cts-hmac-sha1-96|aes128-cts-hmac-sha1-96|des-cbc-md5):[0-9a-fA-F]+"
+    r"(?<!\S)[^\s:]+:"
+    r"(?:aes256-cts-hmac-sha1-96|aes128-cts-hmac-sha1-96|des-cbc-md5):"
+    r"[0-9a-fA-F]+"
 )
 
 _AD_DOMAIN_USER_BACKSLASH = re.compile(
@@ -315,7 +342,9 @@ _KERBEROS_HASH = re.compile(
     r"|[^\s:]+:[^\s]+)"  # AS-REP: user@DOMAIN:hexhash
 )
 
-_DCC2_HASH = re.compile(r"(?:[^\s:]*\$)?DCC2\$\d+#[^#]+#[0-9a-fA-F]{32}")
+_DCC2_HASH = re.compile(
+    r"(?<![\w$])\$?DCC2\$\d+#[^#\s]+#[0-9a-fA-F]{32}(?![0-9a-fA-F])"
+)
 
 _DPAPI_KEY = re.compile(
     r"(?:dpapi_machinekey|dpapi_userkey|NL\$KM)\s*:\s*(?:0x)?[0-9a-fA-F]{20,}"

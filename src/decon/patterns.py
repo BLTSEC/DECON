@@ -428,6 +428,70 @@ def _smb_user_pass_apply(
     return rule.pattern.sub(_replace, text)
 
 
+def _nthash_plaintext_apply(
+    rule: Rule,
+    text: str,
+    mapping: dict[str, str],
+    counters: dict[str, int],
+    applied: list[tuple[str, str, str]] | None = None,
+) -> str:
+    """Redact both halves of a hashcat ``NT-hash:plaintext`` record."""
+    placeholder_values = set(mapping.values())
+
+    def _replace(match: re.Match[str]) -> str:
+        rendered: list[str] = []
+        for value, category, template in (
+            (match.group("hash"), "ntlm_hash", "NTLM_HASH_{n:02d}"),
+            (
+                match.group("plaintext"),
+                "secret",
+                "[SECRET_REDACTED_{n:04d}]",
+            ),
+        ):
+            if value in placeholder_values or _is_typed_placeholder(value):
+                rendered.append(value)
+                continue
+            placeholder = _assign_placeholder(
+                category=category,
+                template=template,
+                value=value,
+                mapping=mapping,
+                counters=counters,
+                placeholder_values=placeholder_values,
+                applied=applied,
+            )
+            rendered.append(placeholder)
+        return ":".join(rendered)
+
+    return rule.pattern.sub(_replace, text)
+
+
+def _impacket_hashes_apply(
+    rule: Rule,
+    text: str,
+    mapping: dict[str, str],
+    counters: dict[str, int],
+    applied: list[tuple[str, str, str]] | None = None,
+) -> str:
+    """Redact the NT half of an Impacket ``-hashes [LM]:NT`` argument."""
+    placeholder_values = set(mapping.values())
+
+    def _replace(match: re.Match[str]) -> str:
+        value = match.group("hash")
+        placeholder = _assign_placeholder(
+            category=rule.category,
+            template=rule.placeholder_template,
+            value=value,
+            mapping=mapping,
+            counters=counters,
+            placeholder_values=placeholder_values,
+            applied=applied,
+        )
+        return match.group("prefix") + placeholder
+
+    return rule.pattern.sub(_replace, text)
+
+
 # Convenience factories for apply_fn — avoids repeating the group number.
 def _apply_group(group: int) -> ApplyFn:
     """Return an apply_fn that replaces a specific capture group."""
@@ -463,6 +527,11 @@ def _cli_flag_apply(
                 part in placeholder_values or _is_typed_placeholder(part)
                 for part in value.split("%", 1)
             )
+        ):
+            return match.group(0)
+        if flag in {"-H", "--hash", "--hashes"} and all(
+            not part or part in placeholder_values or _is_typed_placeholder(part)
+            for part in value.split(":")
         ):
             return match.group(0)
         if (

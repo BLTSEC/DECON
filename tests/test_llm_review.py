@@ -45,7 +45,12 @@ class TestLLMChunking:
             assert previous[-LLM_CHUNK_OVERLAP:] == current[:LLM_CHUNK_OVERLAP]
 
     def test_llm_review_checks_tail_instead_of_truncating(self, monkeypatch, capsys):
-        from decon.llm import MAX_LLM_CHARS, llm_review
+        from decon.llm import (
+            MAX_LLM_CHARS,
+            MAX_REVIEW_OUTPUT_TOKENS,
+            REVIEW_RESPONSE_SCHEMA,
+            llm_review,
+        )
 
         payloads = []
 
@@ -67,8 +72,15 @@ class TestLLMChunking:
             payload = json.loads(request.data.decode())
             payloads.append(payload)
             assert payload["messages"][0]["role"] == "system"
+            assert payload["format"] == REVIEW_RESPONSE_SCHEMA
+            assert payload["options"]["num_predict"] == MAX_REVIEW_OUTPUT_TOKENS
             prompt = payload["messages"][1]["content"]
-            content = "FOUND: tail-secret" if "tail-secret" in prompt else "CLEAN"
+            findings = (
+                [{"value": "tail-secret", "category": "project"}]
+                if "tail-secret" in prompt
+                else []
+            )
+            content = json.dumps({"findings": findings})
             return FakeResponse(content)
 
         monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
@@ -102,7 +114,7 @@ class TestLLMChunking:
         )
 
         assert llm_review("ordinary text") is None
-        assert "outside the CLEAN/FOUND protocol" in capsys.readouterr().err
+        assert "outside the JSON review schema" in capsys.readouterr().err
 
     def test_hallucinated_finding_is_not_treated_as_a_real_leak(
         self, monkeypatch, capsys
@@ -118,7 +130,20 @@ class TestLLMChunking:
 
             def read(self):
                 return json.dumps(
-                    {"message": {"content": "FOUND: invented.example"}}
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "findings": [
+                                        {
+                                            "value": "invented.example",
+                                            "category": "target",
+                                        }
+                                    ]
+                                }
+                            )
+                        }
+                    }
                 ).encode()
 
         monkeypatch.setattr(

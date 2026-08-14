@@ -23,8 +23,8 @@ echo "Investigate [IPV4_REDACTED_0001]:443" \
 ```
 
 > [!CAUTION]
-> Maps, saved sessions, and the audit log all contain the original sensitive
-> values. Maps and sessions are replaced atomically; every persisted file is
+> Maps and saved sessions contain the original sensitive values. Full-detail
+> audit logs do too. Maps and sessions are replaced atomically; every persisted file is
 > forced to mode `0600`, and DECON's state directory is owner-only. This
 > repository ignores `map.json` and `*.decon-map.json`. Never commit, upload, or
 > share any of them.
@@ -78,13 +78,13 @@ Warning: 2 placeholder(s) had no mapping and were left as-is:
 
 ## Audit log
 
-Every substitution is appended to `~/.local/state/decon/audit.jsonl` as one JSON
-record per run:
+By default, each run that performs substitutions appends a metadata-only record
+to `~/.local/state/decon/audit.jsonl`. It contains counts—not source paths or
+original values:
 
 ```json
-{"ts":"2026-07-24T12:00:00+00:00","mode":"redact","status":"emitted","sources":["scan.txt"],
- "substitutions":[{"category":"hostname","original":"dc01.corp.local",
-                   "placeholder":"[HOST_REDACTED_0001]"}]}
+{"schema_version":2,"ts":"2026-08-13T12:00:00+00:00","operation":"redact",
+ "status":"emitted","source_count":1,"total":1,"categories":{"hostname":1}}
 ```
 
 Runs that redact nothing write nothing. If the log cannot be written, DECON
@@ -96,3 +96,13 @@ redaction. Turn it off per run with `--no-audit`, or permanently:
 enabled = false
 # path = "~/engagement-audit.jsonl"
 ```
+
+Enable reversible detail only when it is genuinely useful:
+
+```toml
+[audit]
+enabled = true
+detail = "full"
+```
+
+Full records add `sources` and `substitutions` and must be protected like maps.

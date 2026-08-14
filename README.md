@@ -1,47 +1,46 @@
 # DECON
 
 <p align="center">
-  <img src="assets/decon.jpg" alt="decon" width="100%">
+  <img src="assets/decon.jpg" alt="DECON banner" width="100%">
 </p>
 
 <p align="center">
-  <strong>Sanitize operational data without destroying its analytical value.</strong>
+  <strong>Sanitize engagement data without destroying its analytical value.</strong>
 </p>
 
 <p align="center">
   <img alt="Python 3.11+" src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white">
-  <img alt="Zero dependencies" src="https://img.shields.io/badge/runtime_dependencies-0-2ea44f">
+  <img alt="Zero runtime dependencies" src="https://img.shields.io/badge/runtime_dependencies-0-2ea44f">
   <img alt="License MIT" src="https://img.shields.io/badge/license-MIT-blue">
 </p>
 
 <p align="center">
   <a href="#quick-start">Quick start</a> ·
-  <a href="#how-it-works">How it works</a> ·
-  <a href="#common-workflows">Workflows</a> ·
-  <a href="#configuration">Configuration</a> ·
+  <a href="#operator-workflow">Operator workflow</a> ·
+  <a href="#command-cheat-sheet">Commands</a> ·
+  <a href="#trust-model">Trust model</a> ·
   <a href="#documentation">Documentation</a>
 </p>
 
-DECON replaces sensitive values in pentest, red-team, and CTF output with
-consistent typed placeholders before the data is shared with an LLM, ticket,
-report, or teammate.
+DECON is a local-first sanitization layer for pentest, red-team, and CTF output.
+It replaces sensitive values with stable, typed placeholders before the data is
+sent to an LLM, pasted into a ticket, added to a report, or shared with a
+teammate.
 
 ```text
 10.42.0.15 cannot reach 10.42.0.1. Retrying 10.42.0.15...
 ```
 
-becomes:
-
 ```text
 [IPV4_REDACTED_0001] cannot reach [IPV4_REDACTED_0002]. Retrying [IPV4_REDACTED_0001]...
 ```
 
-Repeated values keep the same identity, preserving topology and relationships
-without exposing the originals.
+Repeated values retain the same placeholder, preserving topology and attack
+paths without exposing the originals.
 
 > [!IMPORTANT]
-> Redaction reduces exposure; it does not prove that text is safe. Review
-> sensitive output before sharing it.
+> DECON reduces disclosure risk; it cannot prove that arbitrary text is safe.
+> Preview sensitive material before it crosses an engagement trust boundary.
 
 ## Quick start
 
@@ -50,200 +49,183 @@ DECON requires Python 3.11+ and has no runtime dependencies.
 ```bash
 git clone https://github.com/BLTSEC/DECON.git
 cd DECON
+uv tool install .                       # or: pipx install .
 
-# Choose one
-pipx install .
-uv tool install .
+decon --init-config
+decon --doctor
 ```
 
 ```bash
-# stdin -> stdout
-cat pentest.log | decon
-
-# file -> clipboard
-decon -c scan.txt
-
-# inspect before sharing
-decon --diff scan.txt
-
-# CI check: 0 = clean, 1 = redactions found
-decon --check report.md
+decon --diff scan.txt                   # inspect
+decon -o scan.redacted.txt scan.txt     # write file
+decon -c scan.txt                       # copy to clipboard
 ```
 
-## How it works
+## Operator workflow
 
-DECON applies deterministic rules in priority order, then assigns stable
-placeholders within the run or imported mapping.
+### 1. Declare the engagement
 
-| Group | Examples |
-|---|---|
-| Network | IPv4, IPv6, CIDR, MAC, URLs, internal hosts, UNC paths |
-| Credentials | Private keys, JWTs, AWS keys, passwords, tokens, API secrets |
-| Active Directory | Domain users, SPNs, SIDs, SAM/NTDS, NTLM, Kerberos, DCC2, DPAPI |
-| Identity and PII | Email, phone, SSN, credit-card numbers with Luhn validation |
-| Local context | Home directories, Windows profiles, LDAP and BloodHound fields |
+Generic rules cannot infer client codenames or naming conventions. Keep a target
+file outside the repository:
 
 ```text
-10.42.0.15             -> [IPV4_REDACTED_0001]
-admin@example.org      -> [EMAIL_REDACTED_0001]
-dc01.corp.local        -> [HOST_REDACTED_0001]
-password=correct-horse -> password=[SECRET_REDACTED_0001]
-```
-
-Use `decon --list-rules` for the authoritative rule list.
-
-DECON intentionally preserves loopback, link-local and documentation IPv4
-ranges, standard Nmap boilerplate URLs, Windows built-in identities, and Nmap
-port lists. Explicitly allow other known-safe values when needed:
-
-```bash
-decon --allow "scanme.nmap.org,10.0.0.1" scan.txt
-```
-
-## Common workflows
-
-### Inspect and share
-
-```bash
-decon --dry-run scan.txt                 # substitutions only
-decon --diff scan.txt                    # unified diff
-decon --verbose scan.txt                 # category counts
-decon --tmux -c                          # active tmux pane -> clipboard
-decon --clipboard-in -o clean.log        # clipboard -> file
-decon --redact "Nighthawk,jsmith" notes.md
-```
-
-### Engagement identifiers
-
-Generic rules cannot infer every client naming convention. Put known targets in
-a portable file:
-
-```text
-# acme-targets.txt
+# ~/engagements/acme.targets
 domain:corp.acme.com
 netbios:ACME
-username:svc_backup
 hostname:DC01
+username:svc_backup
 share:HR-Data
 ```
 
-```bash
-decon --targets acme-targets.txt scan.txt
-```
+Add arbitrary names and labels under `[custom].values_nocase` in the config.
 
-### Batch processing
+### 2. Inspect deterministic redaction
 
 ```bash
-decon reports/**/*.txt --output-dir clean/
+decon --profile pentest \
+  --targets ~/engagements/acme.targets \
+  --diff notes.md
 ```
 
-Files retain their relative paths and share one mapping across the batch.
+The built-in `pentest` profile adds standalone NT-hash detection. It is opt-in
+because a bare 32-character hexadecimal value may be an MD5 checksum.
 
-### Reversible sessions
-
-```bash
-decon --session acme --session-ttl 24h -c scan.txt
-# Paste the redacted content, then copy the response
-decon --restore acme --consume -c
-```
-
-`--consume` deletes the session only after successful output. Sessions are
-owner-only plaintext maps; use short TTLs and remove them when finished.
-
-```bash
-decon --list-sessions
-decon --forget acme
-decon --forget-all
-```
-
-### Local safety review
-
-Ollama can review already-redacted text for identifiers missed by deterministic
-rules:
+### 3. Require local Ollama review
 
 ```toml
+# ~/.config/decon/decon.toml
 [llm]
-enabled = false
-required = false
 model = "qwen3.5:9b"
 host = "http://localhost:11434"
 ```
 
 ```bash
-decon --llm scan.txt
-# Fail closed unless review succeeds and no findings remain
-decon --strict-llm scan.txt
+# Credentials and declared targets remain deterministic. Ollama classifies
+# ambiguous PII and reviews the sanitized result for missed identifiers.
+decon --strict-llm \
+  --profile pentest \
+  --targets ~/engagements/acme.targets \
+  notes.md
 ```
 
-### Ask with an existing CLI subscription
+`uncertain` means redact. Strict mode emits nothing if classification or final
+review fails. Raw candidate context stays on loopback unless
+`llm.allow_remote = true` is explicitly configured.
 
-Review locally with Ollama, send only the sanitized prompt through an existing
-Codex or Claude Code subscription, then restore the answer automatically:
+### 4. Preview, then ask
 
 ```bash
-decon --strict-llm --ask "What should I investigate next?" \
-  --provider codex notes.md
+# No provider authentication or transmission
 
-decon --strict-llm --ask "Summarize the attack paths" \
-  --provider claude-code notes.md
+decon --strict-llm \
+  --targets ~/engagements/acme.targets \
+  --provider codex \
+  --ask "Prioritize the attack paths and recommend the next three checks." \
+  --ask-preview notes.md
+
+# After reviewing the exact sanitized prompt, remove --ask-preview
+
+decon --strict-llm \
+  --targets ~/engagements/acme.targets \
+  --provider codex \
+  --ask "Prioritize the attack paths and recommend the next three checks." \
+  notes.md
 ```
 
-CLI providers default to an isolated, non-persistent run and reject API-key
-authentication before sending the prompt. Sign in first with `codex login` or
-`env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN claude auth login`. API
-providers remain available as `claude` and `openai`.
+DECON sends only the sanitized prompt and restores known placeholders in the
+answer. Use `--provider ollama` to keep both review and analysis local.
 
-See [LLM review and direct questions](docs/llm.md) before enabling a provider.
+| Provider | Boundary | Authentication |
+|---|---|---|
+| `ollama` | Local | None |
+| `codex` | Remote via Codex CLI | ChatGPT subscription (`codex login`) |
+| `claude-code` | Remote via Claude Code | Claude subscription (`claude auth login`) |
+| `openai` | Remote API | `OPENAI_API_KEY` + `openai` SDK |
+| `claude` | Remote API | `ANTHROPIC_API_KEY` + `anthropic` SDK |
+
+CLI providers use an isolated, non-persistent run by default. See
+[LLM workflows](docs/llm.md) before enabling a remote provider.
+
+## Command cheat sheet
+
+| Goal | Command |
+|---|---|
+| stdin → stdout | `cat scan.txt \| decon` |
+| Show substitutions | `decon --dry-run scan.txt` |
+| Review a unified diff | `decon --diff scan.txt` |
+| Copy sanitized output | `decon -c scan.txt` |
+| Sanitize active tmux pane | `decon --tmux -c` |
+| Sanitize clipboard input | `decon --clipboard-in -o clean.txt` |
+| Add literal values | `decon --redact "codename,jsmith" notes.md` |
+| Preserve safe values | `decon --allow "scanme.nmap.org" scan.txt` |
+| Process a directory tree | `decon reports/**/*.txt --output-dir clean/` |
+| CI/pre-commit check | `decon --check report.md` |
+| Inspect rules | `decon --list-rules` |
+| Validate setup | `decon --doctor` |
+
+Batch files retain relative paths and share one mapping. Conservative PII and
+leak decisions are applied across the batch before any output is written.
+
+### Manual round trip
+
+Use a short-lived session when manually sharing sanitized content:
+
+```bash
+decon --session acme --session-ttl 24h -c notes.md
+# Paste the response back, then restore and delete the session
+decon --restore acme --consume -c
+```
+
+Sessions and exported maps contain the original values. They are owner-only
+plaintext files, not encrypted vaults.
 
 ## Configuration
 
-Create an owner-only config:
-
-```bash
-decon --init-config
-```
+`decon --init-config` creates `~/.config/decon/decon.toml` with owner-only
+permissions. A practical engagement layer looks like this:
 
 ```toml
-default_profile = "standard"
-
-[rules]
-phone = false
-credit_card = false
-
 [custom]
-values = ["Project Nighthawk"]
-values_nocase = ["jsmith"]
 target_domains = ["corp.example"]
-hostnames = ["DC01", "prod-web-01"]
-usernames = ["svc_backup"]
-netbios = ["ACME"]
-shares = ["SYSVOL", "HR-Data"]
+values_nocase = ["Project Nighthawk"]
 allowlist = ["scanme.nmap.org"]
+
+[audit]
+enabled = true
+detail = "metadata"
 ```
 
-Configuration lives at `~/.config/decon/decon.toml`. See the
-[configuration reference](docs/configuration.md) for profiles, custom regexes,
-and typed identifiers.
+CLI flags override configuration. Run `decon --doctor` after changing models,
+providers, permissions, or authentication. Use `decon --list-rules` for the
+authoritative detector list.
 
-## Safety boundaries
+## Trust model
 
-- Maps, sessions, and audit entries contain original sensitive values.
-- Persisted DECON state is owner-only (`0700` directories and `0600` files).
-- Maps are replaced atomically but are not encrypted.
-- LLM review is a secondary safety net, not a replacement for deterministic
-  rules or human review.
-- `--ask` sends only sanitized text from DECON, but remote provider use still
-  creates an external trust boundary.
-- Never commit, upload, or share reversible maps or audit logs.
+1. **Deterministic core** redacts credentials, infrastructure, configured
+   targets, and unambiguous identifiers locally.
+2. **Optional local model** classifies ambiguous PII and reviews the result. It
+   never rewrites the document or controls placeholder mappings.
+3. **Outbound gate** blocks remote `--ask` calls when an independent scanner
+   still finds high-confidence credential material.
+4. **Provider boundary** receives only the sanitized prompt, but remains an
+   external trust boundary.
+
+> [!CAUTION]
+> `--force-ask` bypasses an outbound credential block. Use it only after
+> reviewing `--ask-preview` and confirming a false positive. It cannot bypass a
+> failed `--strict-llm` review.
+
+Audit records are metadata-only by default. Maps, sessions, and full-detail
+audit logs may contain original values; never commit or share them.
 
 ## Documentation
 
 | Guide | Contents |
 |---|---|
-| [Configuration](docs/configuration.md) | Rules, profiles, custom patterns, typed identifiers |
-| [Mappings and sessions](docs/mappings-and-sessions.md) | Stable maps, restore, TTLs, audit history |
-| [LLM workflows](docs/llm.md) | Ollama review, strict mode, provider questions |
-| [Python library](docs/library.md) | `sanitize`, `desanitize`, `ask_safely`, target files |
+| [Configuration](docs/configuration.md) | Rules, profiles, custom patterns, typed targets |
+| [Mappings and sessions](docs/mappings-and-sessions.md) | Restore, TTLs, audit history |
+| [LLM workflows](docs/llm.md) | Ollama, strict review, prompt preview, providers |
+| [Python library](docs/library.md) | `sanitize`, `desanitize`, `ask_safely` |
 | [Integrations](docs/integrations.md) | Pre-commit and NOCAP |
 
 Run `decon --help` for the complete CLI reference.
@@ -251,11 +233,9 @@ Run `decon --help` for the complete CLI reference.
 ## Development
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
+python -m venv .venv && source .venv/bin/activate
 pip install -e '.[dev]'
-pytest -q
-ruff check src tests
+pytest -q && ruff check src tests
 ```
 
 ## License

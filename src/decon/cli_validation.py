@@ -62,6 +62,8 @@ def _operation_options(args: argparse.Namespace) -> tuple[tuple[str, bool], ...]
         ("--llm", args.llm),
         ("--strict-llm", args.strict_llm),
         ("--ask", args.ask is not None),
+        ("--ask-preview", args.ask_preview),
+        ("--force-ask", args.force_ask),
         ("--provider", args.provider is not None),
         ("--model", args.model is not None),
         ("--export-map", args.export_map is not None),
@@ -88,6 +90,7 @@ def validate_args(args: argparse.Namespace) -> str | None:
             ("--list-sessions", args.list_sessions),
             ("--forget", args.forget is not None),
             ("--forget-all", args.forget_all),
+            ("--doctor", args.doctor),
         )
     )
     if len(standalone_actions) > 1:
@@ -187,6 +190,13 @@ def validate_args(args: argparse.Namespace) -> str | None:
             )
         )
         return f"{', '.join(flags)} require --ask"
+
+    if args.ask_preview and args.ask is None:
+        return "--ask-preview requires --ask"
+    if args.force_ask and args.ask is None:
+        return "--force-ask requires --ask"
+    if args.force_ask and args.ask_preview:
+        return "--force-ask cannot be used with --ask-preview"
 
     if args.output_dir and any(
         (

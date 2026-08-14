@@ -43,6 +43,11 @@ enabled = false
 required = false
 model = "qwen3.5:9b"
 host = "http://localhost:11434"
+allow_remote = false
+
+[audit]
+enabled = true
+detail = "metadata"       # metadata | full
 ```
 
 Precedence is predictable:
@@ -73,12 +78,22 @@ stops protecting your own identifiers.
 
 ```bash
 decon --profile client-share report.txt
+decon --profile pentest report.txt       # built-in: includes bare NT hashes
 DECON_PROFILE=client-share decon report.txt
 ```
 
 Invalid tables, rule names, value types, regular expressions, and placeholder
 templates fail with a concise configuration error. See
 [`config.example.toml`](../config.example.toml) for the complete example.
+
+The built-in `pentest` profile enables standalone 32-hex NT-hash detection.
+This is opt-in because an isolated 32-hex token can also be an ordinary MD5
+checksum. PII rules remain enabled in every profile: without `--llm` they redact
+conservatively; with `--llm` their ambiguous matches are classified locally.
+
+`llm.allow_remote` defaults to false because PII candidate context is not yet
+redacted. Set it only when a non-loopback Ollama endpoint is inside the trust
+boundary you intend.
 
 ## Direct-question providers
 

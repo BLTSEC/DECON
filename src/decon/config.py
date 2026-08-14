@@ -26,11 +26,14 @@ enabled = false
 required = false
 model = "qwen3.5:9b"
 host = "http://localhost:11434"
+# Any non-loopback reviewer requires an explicit trust-boundary opt-in; PII
+# candidate requests contain the original candidate value.
+allow_remote = false
 
 [audit]
-# Every substitution is logged to ~/.local/state/decon/audit.jsonl.
-# The log contains the real values — treat it like a mapping file.
+# Metadata-only records contain counts, never original values or source paths.
 enabled = true
+detail = "metadata"                 # metadata | full
 # path = "~/engagement-audit.jsonl"
 
 [ask]
@@ -72,6 +75,9 @@ shares = []          # SMB share names, e.g. "SYSVOL"
 # [profiles.client-share]
 # hostname_internal = true
 # custom_values_extra = ["Nighthawk"]
+
+# Built-in profile: --profile pentest
+# Enables context-specific pentest coverage such as standalone NT hashes.
 """
 
 
@@ -81,6 +87,10 @@ shares = []          # SMB share names, e.g. "SYSVOL"
 # Scoped to built-ins: values declared under [custom] are explicit instructions
 # and still apply, so `all = false` never stops redacting your own identifiers.
 ALL_RULES = "all"
+
+BUILTIN_PROFILES: dict[str, dict[str, bool]] = {
+    "pentest": {"ntlm_hash_bare": True},
+}
 
 
 class ConfigError(ValueError):
@@ -134,12 +144,14 @@ def resolve_profile(config: dict, profile: str | None = None) -> dict:
 
     if profile != "standard":
         profiles = _require_table(config, "profiles")
-        if profile not in profiles:
+        if profile not in profiles and profile not in BUILTIN_PROFILES:
             raise ConfigError(f"Unknown profile: {profile}")
-        profile_cfg = profiles[profile]
-        if not isinstance(profile_cfg, dict):
-            raise ConfigError(f"profiles.{profile} must be a table")
-        rules.update(profile_cfg)
+        rules.update(BUILTIN_PROFILES.get(profile, {}))
+        if profile in profiles:
+            profile_cfg = profiles[profile]
+            if not isinstance(profile_cfg, dict):
+                raise ConfigError(f"profiles.{profile} must be a table")
+            rules.update(profile_cfg)
 
     return rules
 
@@ -157,7 +169,11 @@ def apply_config_to_engine(engine, config: dict, profile: str | None = None) -> 
     effective_profile = profile or config.get("default_profile", "standard")
     if not isinstance(effective_profile, str) or not effective_profile.strip():
         raise ConfigError("profile must be a non-empty string")
-    if effective_profile != "standard" and effective_profile not in profiles:
+    if (
+        effective_profile != "standard"
+        and effective_profile not in profiles
+        and effective_profile not in BUILTIN_PROFILES
+    ):
         raise ConfigError(f"Unknown profile: {effective_profile}")
 
     known_rules = {rule.name for rule in engine.rules}
@@ -194,7 +210,10 @@ def apply_config_to_engine(engine, config: dict, profile: str | None = None) -> 
     # `all = false` plus `ipv4 = true` yields ipv4 only.
     layers = [global_rules]
     if effective_profile != "standard":
-        layers.append(profiles[effective_profile])
+        if effective_profile in BUILTIN_PROFILES:
+            layers.append(BUILTIN_PROFILES[effective_profile])
+        if effective_profile in profiles:
+            layers.append(profiles[effective_profile])
 
     for layer in layers:
         blanket = layer.get(ALL_RULES)
@@ -282,7 +301,7 @@ def apply_config_to_engine(engine, config: dict, profile: str | None = None) -> 
         engine.add_allowlist(allowlist)
 
     # Profile-specific extra values
-    if effective_profile != "standard":
+    if effective_profile != "standard" and effective_profile in profiles:
         profile_cfg = profiles[effective_profile]
         if not isinstance(profile_cfg, dict):
             raise ConfigError(f"profiles.{effective_profile} must be a table")
@@ -295,7 +314,7 @@ def apply_config_to_engine(engine, config: dict, profile: str | None = None) -> 
             engine.add_custom_values(extra, case_sensitive=True)
 
     llm = _require_table(config, "llm")
-    for key in ("enabled", "required"):
+    for key in ("enabled", "required", "allow_remote"):
         if key in llm and not isinstance(llm[key], bool):
             raise ConfigError(f"llm.{key} must be true or false")
     for key in ("model", "host"):
@@ -347,6 +366,8 @@ def apply_config_to_engine(engine, config: dict, profile: str | None = None) -> 
         not isinstance(audit["path"], str) or not audit["path"].strip()
     ):
         raise ConfigError("audit.path must be a non-empty string")
+    if "detail" in audit and audit["detail"] not in {"metadata", "full"}:
+        raise ConfigError("audit.detail must be metadata or full")
 
 
 def init_config(*, quiet: bool = False) -> Path:

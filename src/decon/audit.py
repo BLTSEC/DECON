@@ -1,8 +1,8 @@
-"""Append-only audit trail of every substitution DECON makes.
+"""Append-only audit trail of DECON operations.
 
-Enabled by default. The log necessarily contains the real values that were
-redacted, so it is written with the same care as an exported map: an owner-only
-directory, mode 0600, and never committed.
+The default metadata format records counts only. An explicit ``detail=full``
+setting adds source paths and reversible values and must be protected like an
+exported map.
 
 Auditing must never cost the operator their sanitized output — a failure to
 write warns on stderr and the redaction proceeds.
@@ -35,26 +35,41 @@ def write_entry(
     status: str = "emitted",
     sources: list[str] | None = None,
     path: str | None = None,
+    detail: str = "metadata",
+    record_empty: bool = False,
     quiet: bool = False,
 ) -> bool:
     """Append one JSON record describing this run's substitutions.
 
-    Returns True when a record was written. A run that changed nothing writes
-    nothing, so the log stays a record of actual disclosure risk.
+    Returns True when a record was written. A run that changed nothing normally
+    writes nothing; ``record_empty`` exists for explicit boundary events such
+    as a forced provider transmission.
     """
-    if not substitutions:
+    if not substitutions and not record_empty:
         return False
 
-    entry = {
+    if detail not in {"metadata", "full"}:
+        raise ValueError("audit detail must be metadata or full")
+
+    categories: dict[str, int] = {}
+    for category, _original, _placeholder in substitutions:
+        categories[category] = categories.get(category, 0) + 1
+
+    entry: dict[str, object] = {
+        "schema_version": 2,
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "mode": mode,
+        "operation": mode,
         "status": status,
-        "sources": sources or ["-"],
-        "substitutions": [
+        "source_count": len(sources) if sources else 1,
+        "total": len(substitutions),
+        "categories": categories,
+    }
+    if detail == "full":
+        entry["sources"] = sources or ["-"]
+        entry["substitutions"] = [
             {"category": category, "original": original, "placeholder": placeholder}
             for category, original, placeholder in substitutions
-        ],
-    }
+        ]
 
     try:
         destination = audit_path(path)

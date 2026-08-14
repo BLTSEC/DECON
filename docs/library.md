@@ -32,6 +32,10 @@ text, and what `desanitize()` expects. Note this is the inverse of
 They require subscription authentication and do not inherit API-key/provider
 environment variables.
 
+Before a remote call, `ask_safely()` independently blocks known credential
+survivors. `force_ask=True` is available as an explicit bypass for a reviewed
+false positive; it does not add local LLM classification to the library API.
+
 ## Per-engagement targets file
 
 Load a target file directly from the CLI:

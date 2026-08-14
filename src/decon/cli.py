@@ -16,6 +16,7 @@ from decon.ask import (
     DEFAULT_PROVIDER,
     DEFAULT_WARN_CHARS,
     AskError,
+    _build_prompt,
     ask,
     size_warning,
 )
@@ -37,6 +38,7 @@ from decon.config import (
     init_config,
     load_config,
 )
+from decon.doctor import run_doctor
 from decon.engine import RedactionEngine
 from decon.llm import llm_review, parse_findings
 from decon.output import (
@@ -45,6 +47,17 @@ from decon.output import (
     write_clipboard,
     write_file,
     write_stdout,
+)
+from decon.pii import (
+    CONTEXTUAL_PII_RULES,
+    classify_pii_candidates,
+    collect_pii_candidates,
+)
+from decon.safety import (
+    candidate_warning_counts,
+    is_loopback_url,
+    is_remote_provider,
+    scan_high_risk,
 )
 from decon.state import (
     StateError,
@@ -81,6 +94,9 @@ def main(argv: list[str] | None = None) -> int:
         except ConfigError as e:
             print(f"Error: {e}", file=sys.stderr)
             return 1
+
+    if args.doctor:
+        return run_doctor(quiet=args.quiet)
 
     # Session housekeeping needs no config, so a broken config file must not
     # stop you listing or deleting sessions.
@@ -168,6 +184,8 @@ def _load_reverse_config(args: argparse.Namespace) -> dict:
         valid = isinstance(audit["enabled"], bool)
     if valid and "path" in audit:
         valid = isinstance(audit["path"], str) and bool(audit["path"].strip())
+    if valid and "detail" in audit:
+        valid = audit["detail"] in {"metadata", "full"}
     if not valid:
         if not args.quiet:
             print(
@@ -274,10 +292,14 @@ def _run_redaction(
     text: str,
 ) -> int:
     """Redact, optionally review/ask, then emit in whichever mode was chosen."""
-    report = engine.redact_with_report(text)
-    result = report.text
-    applied = report.unique_applied()
-    changed = report.changed
+    result, applied, kept_pii = _redact_with_pii_classification(
+        args,
+        config,
+        engine,
+        text,
+        announce=not (args.check or args.dry_run),
+    )
+    changed = bool(applied)
 
     result, llm_findings, llm_applied = _review_with_llm(
         args,
@@ -287,6 +309,7 @@ def _run_redaction(
         interactive=not (args.check or args.dry_run),
         announce=not (args.check or args.dry_run),
         auto_redact=args.ask is not None,
+        ignore_findings=kept_pii,
     )
 
     redacted_question: str | None = None
@@ -295,9 +318,18 @@ def _run_redaction(
         # The operator's question can contain the same infrastructure values as
         # the document. Run it through the same stateful engine so both sides of
         # the provider prompt share placeholders and reverse cleanly.
-        question_report = engine.redact_with_report(args.ask)
-        redacted_question = question_report.text
-        question_applied.extend(question_report.unique_applied())
+        (
+            redacted_question,
+            initial_question_applied,
+            kept_question_pii,
+        ) = _redact_with_pii_classification(
+            args,
+            config,
+            engine,
+            args.ask,
+            announce=True,
+        )
+        question_applied.extend(initial_question_applied)
         redacted_question, question_findings, question_llm_applied = _review_with_llm(
             args,
             config,
@@ -306,8 +338,31 @@ def _run_redaction(
             interactive=False,
             announce=True,
             auto_redact=True,
+            ignore_findings=kept_question_pii,
         )
         question_applied.extend(question_llm_applied)
+
+        # Classification is context-sensitive, so the same PII-shaped value can
+        # receive different decisions in the question and document. The prompt
+        # crosses one trust boundary, however: if either side decided to redact
+        # a value, redact that exact value on both sides before transmission.
+        contextual_selections: dict[str, set[str]] = {}
+        for category, original, _placeholder in applied + initial_question_applied:
+            if category in CONTEXTUAL_PII_RULES:
+                contextual_selections.setdefault(category, set()).add(original)
+        if contextual_selections:
+            document_sync = engine.redact_rule_values_with_report(
+                result,
+                contextual_selections,
+            )
+            result = document_sync.text
+            question_sync = engine.redact_rule_values_with_report(
+                redacted_question,
+                contextual_selections,
+            )
+            redacted_question = question_sync.text
+            question_applied.extend(document_sync.unique_applied())
+            question_applied.extend(question_sync.unique_applied())
 
         # Question-only LLM findings register new custom rules. Reapply those
         # rules to the document before it leaves the process too. Key this off
@@ -315,7 +370,12 @@ def _run_redaction(
         # reviewer finding that is absent from the question could be present in
         # the document and must not knowingly pass to the provider.
         if question_findings:
-            sync_report = engine.redact_with_report(result)
+            sync_report = engine.redact_with_report(
+                result,
+                defer_rules=(
+                    CONTEXTUAL_PII_RULES if _llm_enabled(args, config) else frozenset()
+                ),
+            )
             result = sync_report.text
             question_applied.extend(sync_report.unique_applied())
 
@@ -323,6 +383,26 @@ def _run_redaction(
 
     if args.ask is not None:
         assert redacted_question is not None
+        preview_status = _preflight_ask(
+            args,
+            engine,
+            config,
+            redacted_question,
+            result,
+            preview=args.ask_preview,
+        )
+        if args.ask_preview:
+            if not _write_output(
+                args,
+                _build_prompt(redacted_question, result),
+            ):
+                return 1
+            if not _export_map(args, engine):
+                return 1
+            _print_stats(args, engine)
+            return preview_status
+        if preview_status:
+            return preview_status
         # Provider calls can fail after transmission. Record the attempt before
         # crossing that trust boundary, without claiming a completed response.
         _record_audit(
@@ -330,7 +410,8 @@ def _run_redaction(
             config,
             audit_applied,
             mode="ask",
-            status="attempted",
+            status="forced_attempt" if args.force_ask else "attempted",
+            record_empty=args.force_ask,
         )
         return _run_ask(
             args,
@@ -466,6 +547,98 @@ def _warn_unresolved(
     )
 
 
+def _ask_settings(args: argparse.Namespace, config: dict) -> dict[str, object]:
+    """Resolve provider settings once for preview, safety, and transmission."""
+    ask_cfg = config.get("ask", {})
+    cli_cfg = ask_cfg.get("cli", {})
+    configured_provider = ask_cfg.get("provider", DEFAULT_PROVIDER)
+    provider = args.provider or configured_provider
+    model = args.model
+    if model is None:
+        model = ask_cfg.get("models", {}).get(provider)
+    if model is None and provider == configured_provider:
+        model = ask_cfg.get("model")
+    return {
+        "provider": provider,
+        "model": model,
+        "host": ask_cfg.get("host", "http://localhost:11434"),
+        "max_tokens": ask_cfg.get("max_tokens", DEFAULT_MAX_TOKENS),
+        "warn_chars": ask_cfg.get("warn_chars", DEFAULT_WARN_CHARS),
+        "cli_mode": cli_cfg.get("mode", DEFAULT_CLI_MODE),
+        "cli_timeout_seconds": cli_cfg.get(
+            "timeout_seconds", DEFAULT_CLI_TIMEOUT_SECONDS
+        ),
+    }
+
+
+def _preflight_ask(
+    args: argparse.Namespace,
+    engine: RedactionEngine,
+    config: dict,
+    question: str,
+    redacted: str,
+    *,
+    preview: bool,
+) -> int:
+    """Warn about candidates and block high-confidence remote survivors."""
+    settings = _ask_settings(args, config)
+    provider = str(settings["provider"])
+    host = str(settings["host"])
+    prompt = _build_prompt(question, redacted)
+    if not is_remote_provider(provider, host):
+        return 0
+
+    mapped_originals = tuple(
+        original
+        for original, placeholder in engine.mapping.items()
+        if original != placeholder
+    )
+    warnings = candidate_warning_counts(
+        prompt,
+        mapped_originals=mapped_originals,
+    )
+    if warnings and not args.quiet:
+        details = ", ".join(
+            f"{category}={count}" for category, count in sorted(warnings.items())
+        )
+        print(
+            "Warning: possible undeclared engagement identifiers remain "
+            f"({details}); add them with --targets if sensitive",
+            file=sys.stderr,
+        )
+
+    findings = scan_high_risk(prompt)
+    if not findings:
+        return 0
+    categories: dict[str, int] = {}
+    for finding in findings:
+        categories[finding.category] = categories.get(finding.category, 0) + 1
+    detail = ", ".join(
+        f"{category}={count}" for category, count in sorted(categories.items())
+    )
+    if args.force_ask and not preview:
+        if not args.quiet:
+            print(
+                "Warning: --force-ask is bypassing outbound credential findings "
+                f"({detail})",
+                file=sys.stderr,
+            )
+        return 0
+    if not args.quiet:
+        action = "Preview is unsafe" if preview else "Provider transmission blocked"
+        remediation = (
+            "Fix rules/targets before transmission."
+            if preview
+            else "Fix rules/targets or use --force-ask after review."
+        )
+        print(
+            f"Error: {action}; high-confidence credential material remains "
+            f"({detail}). {remediation}",
+            file=sys.stderr,
+        )
+    return 1
+
+
 def _ask_provider(
     args: argparse.Namespace,
     config: dict,
@@ -477,24 +650,14 @@ def _ask_provider(
     Both the question and document have already been through the same engine;
     neither original string is sent directly.
     """
-    ask_cfg = config.get("ask", {})
-    cli_cfg = ask_cfg.get("cli", {})
-    configured_provider = ask_cfg.get("provider", DEFAULT_PROVIDER)
-    provider = args.provider or configured_provider
-
-    # Models are keyed by provider so a name can never be sent to the wrong one.
-    # The flat `model` key still works, but only for the provider it was
-    # configured beside.
-    model = args.model
-    if model is None:
-        model = ask_cfg.get("models", {}).get(provider)
-    if model is None and provider == configured_provider:
-        model = ask_cfg.get("model")
+    settings = _ask_settings(args, config)
+    provider = str(settings["provider"])
+    model = settings["model"]
 
     if not args.quiet:
         warning = size_warning(
             f"{question}\n{redacted}",
-            ask_cfg.get("warn_chars", DEFAULT_WARN_CHARS),
+            int(settings["warn_chars"]),
         )
         if warning:
             print(f"Warning: {warning}", file=sys.stderr)
@@ -507,13 +670,11 @@ def _ask_provider(
             question,
             redacted,
             provider=provider,
-            model=model,
-            host=ask_cfg.get("host", "http://localhost:11434"),
-            max_tokens=ask_cfg.get("max_tokens", DEFAULT_MAX_TOKENS),
-            cli_mode=cli_cfg.get("mode", DEFAULT_CLI_MODE),
-            cli_timeout_seconds=cli_cfg.get(
-                "timeout_seconds", DEFAULT_CLI_TIMEOUT_SECONDS
-            ),
+            model=model if isinstance(model, str) else None,
+            host=str(settings["host"]),
+            max_tokens=int(settings["max_tokens"]),
+            cli_mode=str(settings["cli_mode"]),
+            cli_timeout_seconds=int(settings["cli_timeout_seconds"]),
         )
     except AskError as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -528,6 +689,7 @@ def _record_audit(
     mode: str,
     status: str = "emitted",
     sources: list[str] | None = None,
+    record_empty: bool = False,
 ) -> None:
     """Record this run's substitutions unless auditing is switched off."""
     if args.no_audit:
@@ -541,6 +703,8 @@ def _record_audit(
         status=status,
         sources=sources or (args.files or None),
         path=audit_cfg.get("path"),
+        detail=audit_cfg.get("detail", "metadata"),
+        record_empty=record_empty,
         quiet=args.quiet,
     )
 
@@ -562,6 +726,69 @@ def _llm_required(args: argparse.Namespace, config: dict) -> bool:
     return bool(args.strict_llm or llm_cfg.get("required", False))
 
 
+def _redact_with_pii_classification(
+    args: argparse.Namespace,
+    config: dict,
+    engine: RedactionEngine,
+    text: str,
+    *,
+    announce: bool,
+) -> tuple[str, list[tuple[str, str, str]], frozenset[str]]:
+    """Run mandatory rules, then context-classify noisy PII when requested."""
+    enabled = _llm_enabled(args, config)
+    deferred = CONTEXTUAL_PII_RULES if enabled else frozenset()
+    report = engine.redact_with_report(text, defer_rules=deferred)
+    result = report.text
+    applied = report.unique_applied()
+    if not enabled:
+        return result, applied, frozenset()
+
+    candidates = collect_pii_candidates(
+        result,
+        engine.rules,
+        allowlist=engine.allowlist,
+    )
+    if not candidates:
+        return result, applied, frozenset()
+
+    llm_cfg = get_llm_config(config)
+    classification = classify_pii_candidates(
+        candidates,
+        model=llm_cfg.get("model", "qwen3.5:9b"),
+        host=llm_cfg.get("host", "http://localhost:11434"),
+        allow_remote=llm_cfg.get("allow_remote", False),
+        quiet=args.quiet,
+    )
+    if classification is None:
+        if _llm_required(args, config):
+            raise RequiredLLMReviewError(
+                "Ollama PII classification was unavailable or invalid"
+            )
+        selections: dict[str, set[str]] = {}
+        for candidate in candidates:
+            selections.setdefault(candidate.rule_name, set()).add(candidate.value)
+        selected_report = engine.redact_rule_values_with_report(result, selections)
+        result = selected_report.text
+        applied.extend(selected_report.unique_applied())
+        return result, _unique_applied(applied), frozenset()
+
+    selected_report = engine.redact_rule_values_with_report(
+        result,
+        classification.selections,
+    )
+    result = selected_report.text
+    applied.extend(selected_report.unique_applied())
+    if announce and not args.quiet:
+        print(
+            "Local PII classification: "
+            f"{classification.redacted} redact, "
+            f"{classification.uncertain} uncertain, "
+            f"{classification.kept} keep",
+            file=sys.stderr,
+        )
+    return result, _unique_applied(applied), classification.kept_values
+
+
 def _review_with_llm(
     args: argparse.Namespace,
     config: dict,
@@ -571,6 +798,7 @@ def _review_with_llm(
     interactive: bool,
     announce: bool,
     auto_redact: bool = False,
+    ignore_findings: frozenset[str] = frozenset(),
 ) -> tuple[str, list[str], list[tuple[str, str, str]]]:
     """Run optional LLM review.
 
@@ -583,10 +811,23 @@ def _review_with_llm(
 
     llm_cfg = get_llm_config(config)
     required = _llm_required(args, config)
+    host = llm_cfg.get("host", "http://localhost:11434")
+    if not is_loopback_url(host) and not llm_cfg.get("allow_remote", False):
+        if required:
+            raise RequiredLLMReviewError(
+                "non-loopback Ollama review requires llm.allow_remote = true"
+            )
+        if not args.quiet:
+            print(
+                "Warning: non-loopback Ollama review skipped; set "
+                "llm.allow_remote = true only if that host is trusted",
+                file=sys.stderr,
+            )
+        return result, [], []
     review = llm_review(
         result,
         model=llm_cfg.get("model", "qwen3.5:9b"),
-        host=llm_cfg.get("host", "http://localhost:11434"),
+        host=host,
         quiet=args.quiet,
     )
     if not review:
@@ -597,9 +838,9 @@ def _review_with_llm(
         return result, [], []
 
     findings = parse_findings(review)
+    ignored = {value.casefold() for value in ignore_findings}
+    findings = [value for value in findings if value.casefold() not in ignored]
     if not findings:
-        if required:
-            raise RequiredLLMReviewError("Ollama returned an invalid review response")
         return result, [], []
 
     accepted: list[tuple[str, str, str]] = []
@@ -608,7 +849,10 @@ def _review_with_llm(
         # the local reviewer just identified. Other modes retain the existing
         # operator-review behavior.
         engine.add_custom_values(findings, case_sensitive=False)
-        report = engine.redact_with_report(result)
+        report = engine.redact_with_report(
+            result,
+            defer_rules=CONTEXTUAL_PII_RULES,
+        )
         result = report.text
         accepted = report.unique_applied()
         if announce and not args.quiet:
@@ -621,13 +865,17 @@ def _review_with_llm(
         selected = _prompt_llm_review(findings)
         if selected:
             engine.add_custom_values(selected, case_sensitive=False)
-            report = engine.redact_with_report(result)
+            report = engine.redact_with_report(
+                result,
+                defer_rules=CONTEXTUAL_PII_RULES,
+            )
             result = report.text
             accepted = report.unique_applied()
             print(f"Redacted {len(selected)} value(s)", file=sys.stderr)
     elif announce and not args.quiet:
         print("LLM review flagged potential issues:", file=sys.stderr)
-        print(review, file=sys.stderr)
+        for finding in findings:
+            print(f"FOUND: {finding}", file=sys.stderr)
         print("---", file=sys.stderr)
 
     if required:
@@ -743,6 +991,7 @@ def _batch_process(
     """Process multiple files, writing each to output-dir."""
     output_paths = _build_batch_output_paths(args.files, args.output_dir)
     processed: list[tuple[str, str, list[tuple[str, str, str]]]] = []
+    contextual_selections: dict[str, set[str]] = {}
 
     for path in args.files:
         try:
@@ -752,8 +1001,13 @@ def _batch_process(
             print(f"Error reading {path}: {e}", file=sys.stderr)
             return 1
 
-        report = engine.redact_with_report(text)
-        result = report.text
+        result, initial_applied, kept_pii = _redact_with_pii_classification(
+            args,
+            config,
+            engine,
+            text,
+            announce=True,
+        )
         result, _findings, llm_applied = _review_with_llm(
             args,
             config,
@@ -761,8 +1015,31 @@ def _batch_process(
             result,
             interactive=False,
             announce=True,
+            ignore_findings=kept_pii,
         )
-        processed.append((path, result, report.unique_applied() + llm_applied))
+        for category, original, _placeholder in initial_applied:
+            if category in CONTEXTUAL_PII_RULES:
+                contextual_selections.setdefault(category, set()).add(original)
+        processed.append((path, result, initial_applied + llm_applied))
+
+    # A batch is one disclosure boundary. Reapply rules learned from later
+    # files to earlier results, then make any contextual PII redact decision
+    # win globally before a single file is written.
+    globally_synced: list[tuple[str, str, list[tuple[str, str, str]]]] = []
+    deferred = CONTEXTUAL_PII_RULES if _llm_enabled(args, config) else frozenset()
+    for path, result, applied in processed:
+        rule_sync = engine.redact_with_report(result, defer_rules=deferred)
+        result = rule_sync.text
+        applied = applied + rule_sync.unique_applied()
+        if contextual_selections:
+            pii_sync = engine.redact_rule_values_with_report(
+                result,
+                contextual_selections,
+            )
+            result = pii_sync.text
+            applied = applied + pii_sync.unique_applied()
+        globally_synced.append((path, result, applied))
+    processed = globally_synced
 
     # Review every file before creating or writing the output tree. In strict
     # mode, one failed review therefore cannot leave a partially emitted batch.
