@@ -15,6 +15,7 @@
 </p>
 
 <p align="center">
+  <a href="https://bltsec.com/blog/decon/">Operator guide</a> ·
   <a href="#quick-start">Quick start</a> ·
   <a href="#operator-workflow">Operator workflow</a> ·
   <a href="#command-cheat-sheet">Commands</a> ·
