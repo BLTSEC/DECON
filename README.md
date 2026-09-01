@@ -64,6 +64,23 @@ decon -c scan.txt                       # copy to clipboard
 
 ## Operator workflow
 
+### TACMUX 2.5 export boundary
+
+From a TACMUX target or operations session, export the current engagement and
+sanitize a separate copy before reporting, sharing, or remote AI use:
+
+```bash
+handoff="$(tacmux export handoff)"
+decon --profile pentest --diff "$handoff"
+decon --profile pentest -o "${handoff%.md}.redacted.md" "$handoff"
+```
+
+The TACMUX handoff is a private, unredacted point-in-time export—not a verified
+archive and not safe to share by default. DECON reduces disclosure risk, but its
+redacted output still requires operator review before it crosses a trust
+boundary. Keep the original export and any DECON mapping/session files on
+protected local storage.
+
 ### 1. Declare the engagement
 
 Generic rules cannot infer client codenames or naming conventions. Keep a target
@@ -152,6 +169,7 @@ CLI providers use an isolated, non-persistent run by default. See
 | Review a unified diff | `decon --diff scan.txt` |
 | Copy sanitized output | `decon -c scan.txt` |
 | Sanitize active tmux pane | `decon --tmux -c` |
+| Sanitize TACMUX handoff | `handoff="$(tacmux export handoff)"; decon --profile pentest -o "${handoff%.md}.redacted.md" "$handoff"` |
 | Sanitize clipboard input | `decon --clipboard-in -o clean.txt` |
 | Add literal values | `decon --redact "codename,jsmith" notes.md` |
 | Preserve safe values | `decon --allow "scanme.nmap.org" scan.txt` |
